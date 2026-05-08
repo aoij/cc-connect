@@ -10270,6 +10270,10 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		if s.ID == activeAgentID {
 			switchExtra["action_mode"] = "switch_current"
 		}
+		if threadTitle := sessionThreadTitle(agentName, i+1, displayName); threadTitle != "" {
+			switchExtra["thread_title"] = threadTitle
+			newThreadExtra["thread_title"] = threadTitle
+		}
 		rowText := fmt.Sprintf(
 			"**%d. %s**\n<font color='grey'>%s · %d 条消息 · 更新于 %s</font>",
 			i+1, displayName, statusLabel, s.MessageCount, s.ModifiedAt.Format("01-02 15:04"),
@@ -10297,6 +10301,32 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	}
 
 	return cb.Build(), nil
+}
+
+func sessionThreadTitle(agentName string, index int, displayName string) string {
+	title := strings.TrimSpace(displayName)
+	title = strings.TrimPrefix(title, "📌 ")
+	title = strings.ReplaceAll(title, "\n", " ")
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		title = "会话"
+	}
+	runes := []rune(title)
+	if len(runes) > 36 {
+		title = string(runes[:36]) + "…"
+	}
+	return fmt.Sprintf("%s #%d｜%s", agentThreadTitlePrefix(agentName), index, title)
+}
+
+func agentThreadTitlePrefix(agentName string) string {
+	switch strings.ToLower(strings.TrimSpace(agentName)) {
+	case "codex":
+		return "Codex"
+	case "":
+		return "会话"
+	default:
+		return strings.TrimSpace(agentName)
+	}
 }
 
 // dirCardTruncPath shortens absolute paths for card list rows.

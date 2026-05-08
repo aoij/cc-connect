@@ -463,8 +463,8 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 		if chatID != "oc_test_chat" {
 			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
 		}
-		if !strings.Contains(content, "1") {
-			t.Fatalf("content = %q, want switch target", content)
+		if content != "Codex #1｜chatgpt2api 分析当前部署" {
+			t.Fatalf("content = %q, want named switch topic title", content)
 		}
 		created <- struct{}{}
 		return "om_new_root", nil
@@ -533,7 +533,18 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 
 func TestBuildSwitchThreadTitleUsesSessionTitle(t *testing.T) {
 	got := buildSwitchThreadTitle("2", "📌 chatgpt2api 分析下当前项目部署的这个服务")
-	want := "💬 #2｜chatgpt2api 分析下当前项目部署的这个服务"
+	want := "Codex #2｜chatgpt2api 分析下当前项目部署的这个服务"
+	if got != want {
+		t.Fatalf("buildSwitchThreadTitle() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSwitchThreadTitlePrefersExplicitThreadTitle(t *testing.T) {
+	got := buildSwitchThreadTitle("2", map[string]any{
+		"session_title": "📌 fallback",
+		"thread_title":  "Codex #2｜clean title",
+	})
+	want := "Codex #2｜clean title"
 	if got != want {
 		t.Fatalf("buildSwitchThreadTitle() = %q, want %q", got, want)
 	}
@@ -541,14 +552,107 @@ func TestBuildSwitchThreadTitleUsesSessionTitle(t *testing.T) {
 
 func TestBuildSwitchThreadTitleTruncatesLongTitle(t *testing.T) {
 	got := buildSwitchThreadTitle("3", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	if !strings.HasPrefix(got, "💬 #3｜") {
+	if !strings.HasPrefix(got, "Codex #3｜") {
 		t.Fatalf("title prefix = %q, want switch thread prefix", got)
 	}
-	if len([]rune(strings.TrimPrefix(got, "💬 #3｜"))) != 33 {
-		t.Fatalf("truncated title length = %d, want 33 including ellipsis: %q", len([]rune(strings.TrimPrefix(got, "💬 #3｜"))), got)
+	if len([]rune(strings.TrimPrefix(got, "Codex #3｜"))) != 37 {
+		t.Fatalf("truncated title length = %d, want 37 including ellipsis: %q", len([]rune(strings.TrimPrefix(got, "Codex #3｜"))), got)
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("title = %q, want ellipsis suffix", got)
+	}
+}
+
+func TestBuildCommandThreadTitleNamesTopLevelList(t *testing.T) {
+	got, ok := buildCommandThreadTitle("/list")
+	if !ok {
+		t.Fatal("buildCommandThreadTitle returned ok=false")
+	}
+	if got != "Codex｜会话列表" {
+		t.Fatalf("title = %q, want Codex｜会话列表", got)
+	}
+}
+
+func TestInteractivePlatform_TopLevelCommandCreatesNamedTopic(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"thread_isolation":   true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+
+	created := make(chan string, 1)
+	ip.createThreadRootHook = func(_ context.Context, chatID, content string) (string, error) {
+		if chatID != "oc_test_chat" {
+			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
+		}
+		created <- content
+		return "om_named_root", nil
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	msgID := "om_user_command"
+	chatID := "oc_test_chat"
+	userID := "ou_test_user"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"@_user_1 /list"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &userID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+				Mentions: []*larkim.MentionEvent{{
+					Key:  stringPtr("@_user_1"),
+					Name: stringPtr("ai_work"),
+					Id:   &larkim.UserId{OpenId: stringPtr("ou_bot")},
+				}},
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case title := <-created:
+		if title != "Codex｜会话列表" {
+			t.Fatalf("created topic title = %q, want Codex｜会话列表", title)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected createThreadRootHook to be called")
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_named_root" {
+			t.Fatalf("SessionKey = %q, want named topic root session", msg.SessionKey)
+		}
+		if msg.Content != "/list" {
+			t.Fatalf("Content = %q, want /list", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected command to dispatch through named topic")
 	}
 }
 

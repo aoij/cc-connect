@@ -560,7 +560,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if actionMode == "switch_session" {
 			target := strings.TrimSpace(strings.TrimPrefix(actionVal, "act:/switch "))
 			if target != "" {
-				rootText := buildSwitchThreadTitle(target, event.Event.Action.Value["session_title"])
+				rootText := buildSwitchThreadTitle(target, event.Event.Action.Value)
 				rootMsgID, err := p.createThreadRootMessage(context.Background(), chatID, rootText)
 				if err != nil {
 					slog.Error(p.tag()+": create thread root for switch failed", "target", target, "chat_id", chatID, "error", err)
@@ -1079,6 +1079,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		sessionKey = aliasSessionKey
 	}
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	if namedSessionKey, namedReplyCtx, ok := p.createNamedCommandThreadIfNeeded(ctx, chatID, chatType, msgType, content, mentions, rootID, parentID, threadID); ok {
+		sessionKey = namedSessionKey
+		rctx = namedReplyCtx
+		parentID = ""
+	}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
@@ -3196,20 +3201,149 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 	return !p.noReplyToTrigger
 }
 
-func buildSwitchThreadTitle(target string, titleVal any) string {
-	title, _ := titleVal.(string)
+func (p *Platform) createNamedCommandThreadIfNeeded(ctx context.Context, chatID, chatType, msgType, content string, mentions []*larkim.MentionEvent, rootID, parentID, threadID string) (string, replyContext, bool) {
+	if !p.threadIsolation || chatID == "" || chatType != "group" || msgType != "text" {
+		return "", replyContext{}, false
+	}
+	// Only split a fresh named topic for top-level command messages. Messages
+	// already inside a Feishu topic must stay in that topic so context is stable.
+	if rootID != "" || parentID != "" || threadID != "" {
+		return "", replyContext{}, false
+	}
+	text, ok := parseTextMessageContent(content)
+	if !ok {
+		return "", replyContext{}, false
+	}
+	text = stripMentions(text, mentions, p.botOpenID)
+	title, ok := buildCommandThreadTitle(text)
+	if !ok {
+		return "", replyContext{}, false
+	}
+	rootMsgID, err := p.createThreadRootMessage(ctx, chatID, title)
+	if err != nil {
+		slog.Warn(p.tag()+": create named command thread failed, falling back to user topic",
+			"chat_id", chatID, "command", firstCommandWord(text), "error", err)
+		return "", replyContext{}, false
+	}
+	newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+	p.markBotThreadRootForSession(rootMsgID, newSessionKey)
+	p.registerThreadAliasFromRootAsync(chatID, rootMsgID, newSessionKey)
+	return newSessionKey, replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}, true
+}
+
+func parseTextMessageContent(content string) (string, bool) {
+	var textBody struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(content), &textBody); err != nil {
+		return "", false
+	}
+	return textBody.Text, true
+}
+
+func firstCommandWord(text string) string {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func buildCommandThreadTitle(commandText string) (string, bool) {
+	commandText = strings.TrimSpace(commandText)
+	if commandText == "" || !strings.HasPrefix(commandText, "/") {
+		return "", false
+	}
+	fields := strings.Fields(commandText)
+	if len(fields) == 0 {
+		return "", false
+	}
+	cmd := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	label := ""
+	switch cmd {
+	case "list":
+		label = "会话列表"
+	case "current":
+		label = "当前会话"
+	case "new":
+		label = "新建会话"
+	case "switch":
+		if len(fields) > 1 {
+			label = "切换会话 #" + fields[1]
+		} else {
+			label = "切换会话"
+		}
+	case "delete", "delete-one", "delete-mode":
+		label = "会话管理"
+	case "dir":
+		label = "工作目录"
+	case "help":
+		label = "帮助"
+	case "status":
+		label = "运行状态"
+	case "model":
+		label = "模型设置"
+	case "reasoning":
+		label = "推理强度"
+	case "mode":
+		label = "工作模式"
+	case "provider":
+		label = "服务商设置"
+	case "commands":
+		label = "命令列表"
+	case "skills":
+		label = "技能列表"
+	case "config":
+		label = "配置"
+	case "doctor":
+		label = "诊断"
+	case "version":
+		label = "版本"
+	default:
+		label = sanitizeThreadTitle(commandText)
+	}
+	if label == "" {
+		label = "命令"
+	}
+	return "Codex｜" + truncateThreadTitle(label, 36), true
+}
+
+func buildSwitchThreadTitle(target string, actionValue any) string {
+	if value, ok := actionValue.(map[string]any); ok {
+		if explicit, _ := value["thread_title"].(string); strings.TrimSpace(explicit) != "" {
+			return truncateThreadTitle(sanitizeThreadTitle(explicit), 48)
+		}
+		actionValue = value["session_title"]
+	}
+	title, _ := actionValue.(string)
+	title = sanitizeThreadTitle(title)
+	if title == "" {
+		return fmt.Sprintf("Codex｜会话 #%s", target)
+	}
+	return fmt.Sprintf("Codex #%s｜%s", target, truncateThreadTitle(title, 36))
+}
+
+func sanitizeThreadTitle(title string) string {
 	title = strings.TrimSpace(title)
-	title = strings.TrimPrefix(title, "📌 ")
+	for _, prefix := range []string{"📌 ", "💬 "} {
+		title = strings.TrimPrefix(title, prefix)
+	}
+	title = strings.Trim(title, "*`_")
 	title = strings.ReplaceAll(title, "\n", " ")
 	title = strings.Join(strings.Fields(title), " ")
-	if title == "" {
-		return fmt.Sprintf("💬 会话 #%s", target)
+	return title
+}
+
+func truncateThreadTitle(title string, maxRunes int) string {
+	title = strings.TrimSpace(title)
+	if maxRunes <= 0 {
+		return title
 	}
 	runes := []rune(title)
-	if len(runes) > 32 {
-		title = string(runes[:32]) + "…"
+	if len(runes) <= maxRunes {
+		return title
 	}
-	return fmt.Sprintf("💬 #%s｜%s", target, title)
+	return string(runes[:maxRunes]) + "…"
 }
 
 func (p *Platform) createThreadRootMessage(ctx context.Context, chatID, content string) (string, error) {

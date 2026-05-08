@@ -3317,8 +3317,8 @@ func TestDeleteMode_CancelReturnsListCard(t *testing.T) {
 	if card == nil {
 		t.Fatal("expected list card after cancel")
 	}
-	if got := countCardActionValues(card, "act:/switch "); got != 2 {
-		t.Fatalf("switch action count = %d, want 2", got)
+	if got := countCardActionValues(card, "act:/switch "); got != 4 {
+		t.Fatalf("switch action count = %d, want 4", got)
 	}
 }
 
@@ -5051,6 +5051,9 @@ func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
 	}
 	if item.Actions[1].Extra["session_title"] != "Session one" {
 		t.Fatalf("session_title = %q, want Session one", item.Actions[1].Extra["session_title"])
+	}
+	if item.Actions[1].Extra["thread_title"] != "stub #1｜Session one" {
+		t.Fatalf("thread_title = %q, want stub #1｜Session one", item.Actions[1].Extra["thread_title"])
 	}
 	if item.Actions[2].Text != "删除" || item.Actions[2].Value != "act:/delete-one ask 1" || item.Actions[2].Type != "danger" {
 		t.Fatalf("third action = %#v, want delete-one ask", item.Actions[2])
