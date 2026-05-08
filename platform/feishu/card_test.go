@@ -267,11 +267,11 @@ func TestRenderCardMap_ListItemExtraPropsArePreserved(t *testing.T) {
 	}
 }
 
-func TestRenderCardMap_ListItemActionsRenderMultipleButtons(t *testing.T) {
+func TestRenderCardMap_ListItemActionsRenderAsCompactSessionCard(t *testing.T) {
 	card := core.NewCard().
-		ListItemActions("Session one",
-			core.CardButton{Text: "进入", Type: "primary", Value: "act:/switch 1"},
-			core.CardButton{Text: "新话题", Type: "default", Value: "act:/switch 1", Extra: map[string]string{"action_mode": "switch_session"}},
+		ListItemActions("**1. Session one**\n<font color='grey'>当前会话 · 1 条消息 · 更新于 05-08 12:12</font>",
+			core.CardButton{Text: "进入当前", Type: "primary_filled", Value: "act:/switch 1"},
+			core.CardButton{Text: "开新话题", Type: "default", Value: "act:/switch 1", Extra: map[string]string{"action_mode": "switch_session"}},
 			core.CardButton{Text: "删除", Type: "danger", Value: "act:/delete-one ask 1"},
 		).
 		Build()
@@ -282,13 +282,33 @@ func TestRenderCardMap_ListItemActionsRenderMultipleButtons(t *testing.T) {
 		t.Fatalf("elements = %#v, want one element", got["elements"])
 	}
 	row := elements[0].(map[string]any)
-	columns := row["columns"].([]any)
-	actionCol := columns[1].(map[string]any)
-	inner := actionCol["elements"].([]any)
-	if len(inner) != 3 {
-		t.Fatalf("action buttons = %d, want 3", len(inner))
+	if row["background_style"] != "grey" {
+		t.Fatalf("background_style = %#v, want grey", row["background_style"])
 	}
-	deleteBtn := inner[2].(map[string]any)
+	columns := row["columns"].([]any)
+	if len(columns) != 1 {
+		t.Fatalf("columns = %d, want one full-width content column", len(columns))
+	}
+	contentCol := columns[0].(map[string]any)
+	inner := contentCol["elements"].([]any)
+	if len(inner) != 2 {
+		t.Fatalf("content elements = %d, want markdown + button row", len(inner))
+	}
+	buttonRow := inner[1].(map[string]any)
+	if buttonRow["tag"] != "column_set" || buttonRow["flex_mode"] != "trisect" {
+		t.Fatalf("button row = %#v, want trisect column_set", buttonRow)
+	}
+	buttonCols := buttonRow["columns"].([]any)
+	if len(buttonCols) != 3 {
+		t.Fatalf("button columns = %d, want 3", len(buttonCols))
+	}
+	firstCol := buttonCols[0].(map[string]any)
+	firstBtn := firstCol["elements"].([]any)[0].(map[string]any)
+	if firstBtn["type"] != "primary_filled" || firstBtn["width"] != "fill" || firstBtn["size"] != "small" {
+		t.Fatalf("first button = %#v, want filled small fill button", firstBtn)
+	}
+	deleteCol := buttonCols[2].(map[string]any)
+	deleteBtn := deleteCol["elements"].([]any)[0].(map[string]any)
 	if deleteBtn["type"] != "danger" {
 		t.Fatalf("delete button type = %#v, want danger", deleteBtn["type"])
 	}

@@ -4956,8 +4956,8 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	if !ok {
 		t.Fatal("expected active session switch action to exist")
 	}
-	if btn.Type != "primary" {
-		t.Fatalf("active session button type = %q, want primary", btn.Type)
+	if btn.Type != "primary_filled" {
+		t.Fatalf("active session button type = %q, want primary_filled", btn.Type)
 	}
 }
 
@@ -4983,13 +4983,13 @@ func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
 	if len(item.Actions) != 3 {
 		t.Fatalf("actions = %d, want 3", len(item.Actions))
 	}
-	if item.Actions[0].Text != "进入" || item.Actions[0].Value != "act:/switch 1" {
+	if item.Actions[0].Text != "进入当前" || item.Actions[0].Value != "act:/switch 1" {
 		t.Fatalf("first action = %#v, want enter switch", item.Actions[0])
 	}
 	if item.Actions[0].Extra["action_mode"] == "switch_session" {
 		t.Fatalf("enter action should not create a new thread: %#v", item.Actions[0].Extra)
 	}
-	if item.Actions[1].Text != "新话题" || item.Actions[1].Value != "act:/switch 1" {
+	if item.Actions[1].Text != "开新话题" || item.Actions[1].Value != "act:/switch 1" {
 		t.Fatalf("second action = %#v, want new topic switch", item.Actions[1])
 	}
 	if item.Actions[1].Extra["action_mode"] != "switch_session" {

@@ -10180,10 +10180,6 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	cb := NewCard().Title(titleStr, "turquoise")
 	for i := start; i < end; i++ {
 		s := agentSessions[i]
-		marker := "◻"
-		if s.ID == activeAgentID {
-			marker = "▶"
-		}
 		displayName := sessions.GetSessionName(s.ID)
 		if displayName != "" {
 			displayName = "📌 " + displayName
@@ -10193,23 +10189,29 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			if displayName == "" {
 				displayName = e.i18n.T(MsgListEmptySummary)
 			}
-			if len([]rune(displayName)) > 40 {
-				displayName = string([]rune(displayName)[:40]) + "…"
+			if len([]rune(displayName)) > 56 {
+				displayName = string([]rune(displayName)[:56]) + "…"
 			}
 		}
 		btnType := "default"
+		statusLabel := "可切换"
 		if s.ID == activeAgentID {
-			btnType = "primary"
+			btnType = "primary_filled"
+			statusLabel = "当前会话"
 		}
 		switchExtra := map[string]string{"session_title": displayName}
 		newThreadExtra := map[string]string{"action_mode": "switch_session", "session_title": displayName}
 		if s.ID == activeAgentID {
 			switchExtra["action_mode"] = "switch_current"
 		}
+		rowText := fmt.Sprintf(
+			"**%d. %s**\n<font color='grey'>%s · %d 条消息 · 更新于 %s</font>",
+			i+1, displayName, statusLabel, s.MessageCount, s.ModifiedAt.Format("01-02 15:04"),
+		)
 		cb.ListItemActions(
-			e.i18n.Tf(MsgListItem, marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
-			CardButton{Text: "进入", Type: btnType, Value: fmt.Sprintf("act:/switch %d", i+1), Extra: switchExtra},
-			CardButton{Text: "新话题", Type: "default", Value: fmt.Sprintf("act:/switch %d", i+1), Extra: newThreadExtra},
+			rowText,
+			CardButton{Text: "进入当前", Type: btnType, Value: fmt.Sprintf("act:/switch %d", i+1), Extra: switchExtra},
+			CardButton{Text: "开新话题", Type: "default", Value: fmt.Sprintf("act:/switch %d", i+1), Extra: newThreadExtra},
 			CardButton{Text: "删除", Type: "danger", Value: fmt.Sprintf("act:/delete-one ask %d", i+1)},
 		)
 	}

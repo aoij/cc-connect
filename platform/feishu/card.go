@@ -178,59 +178,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				}
 			}
 		case core.CardListItem:
-			actionButtons := e.Actions
-			if len(actionButtons) == 0 {
-				actionButtons = []core.CardButton{{
-					Text:  e.BtnText,
-					Type:  e.BtnType,
-					Value: e.BtnValue,
-					Extra: e.Extra,
-				}}
-			}
-			actionElems := make([]map[string]any, 0, len(actionButtons))
-			for _, btn := range actionButtons {
-				btnType := btn.Type
-				if btnType == "" {
-					btnType = "default"
-				}
-				valMap := map[string]string{"action": btn.Value}
-				if sessionKey != "" {
-					valMap["session_key"] = sessionKey
-				}
-				for k, v := range btn.Extra {
-					valMap[k] = v
-				}
-				actionElems = append(actionElems, map[string]any{
-					"tag":   "button",
-					"text":  plainText(btn.Text),
-					"type":  btnType,
-					"value": valMap,
-				})
-			}
-			elements = append(elements, map[string]any{
-				"tag":       "column_set",
-				"flex_mode": "none",
-				"columns": []map[string]any{
-					{
-						"tag":            "column",
-						"width":          "weighted",
-						"weight":         6,
-						"vertical_align": "center",
-						"elements": []map[string]any{
-							{
-								"tag":     "markdown",
-								"content": e.Text,
-							},
-						},
-					},
-					{
-						"tag":            "column",
-						"width":          "auto",
-						"vertical_align": "center",
-						"elements":       actionElems,
-					},
-				},
-			})
+			elements = append(elements, renderCardListItem(e, sessionKey))
 		case core.CardSelect:
 			var options []map[string]any
 			for _, opt := range e.Options {
@@ -268,6 +216,119 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 
 	result["elements"] = elements
 	return result
+}
+
+func renderCardListItem(e core.CardListItem, sessionKey string) map[string]any {
+	actionButtons := e.Actions
+	if len(actionButtons) == 0 {
+		actionButtons = []core.CardButton{{
+			Text:  e.BtnText,
+			Type:  e.BtnType,
+			Value: e.BtnValue,
+			Extra: e.Extra,
+		}}
+	}
+
+	buttonElements := make([]map[string]any, 0, len(actionButtons))
+	for _, btn := range actionButtons {
+		btnType := btn.Type
+		if btnType == "" {
+			btnType = "default"
+		}
+		valMap := map[string]string{"action": btn.Value}
+		if sessionKey != "" {
+			valMap["session_key"] = sessionKey
+		}
+		for k, v := range btn.Extra {
+			valMap[k] = v
+		}
+		buttonElements = append(buttonElements, map[string]any{
+			"tag":   "button",
+			"text":  plainText(btn.Text),
+			"type":  btnType,
+			"size":  "small",
+			"width": "fill",
+			"value": valMap,
+		})
+	}
+
+	content := strings.TrimSpace(e.Text)
+	if content == "" {
+		content = " "
+	}
+
+	if len(actionButtons) <= 1 {
+		return map[string]any{
+			"tag":                "column_set",
+			"flex_mode":          "none",
+			"horizontal_spacing": "medium",
+			"margin":             "6px 0",
+			"columns": []map[string]any{
+				{
+					"tag":              "column",
+					"width":            "weighted",
+					"weight":           1,
+					"vertical_align":   "center",
+					"vertical_spacing": "small",
+					"padding":          "8px 10px",
+					"elements": []map[string]any{{
+						"tag":     "markdown",
+						"content": content,
+					}},
+				},
+				{
+					"tag":              "column",
+					"width":            "100px",
+					"vertical_align":   "center",
+					"horizontal_align": "right",
+					"elements":         buttonElements,
+				},
+			},
+		}
+	}
+
+	buttonColumns := make([]map[string]any, 0, len(buttonElements))
+	for _, action := range buttonElements {
+		buttonColumns = append(buttonColumns, map[string]any{
+			"tag":              "column",
+			"width":            "weighted",
+			"weight":           1,
+			"vertical_align":   "center",
+			"horizontal_align": "center",
+			"elements":         []map[string]any{action},
+		})
+	}
+
+	return map[string]any{
+		"tag":                "column_set",
+		"flex_mode":          "none",
+		"horizontal_spacing": "medium",
+		"background_style":   "grey",
+		"margin":             "8px 0",
+		"columns": []map[string]any{
+			{
+				"tag":              "column",
+				"width":            "weighted",
+				"weight":           1,
+				"vertical_align":   "top",
+				"vertical_spacing": "small",
+				"padding":          "10px 12px",
+				"elements": []map[string]any{
+					{
+						"tag":     "markdown",
+						"content": content,
+					},
+					{
+						"tag":                "column_set",
+						"flex_mode":          "trisect",
+						"horizontal_spacing": "small",
+						"margin":             "6px 0 0 0",
+						"columns":            buttonColumns,
+					},
+				},
+			},
+		},
+	}
 }
 
 type deleteModeCheckerRow struct {
