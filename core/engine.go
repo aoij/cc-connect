@@ -2291,11 +2291,11 @@ func taskTopicTitle(status, userText, previousTitle string) string {
 	}
 	switch status {
 	case "running":
-		return "[进行中] " + summary
+		return "[进行中]" + summary
 	case "done":
-		return "[已完成] " + summary
+		return "[已完成]" + summary
 	case "failed":
-		return "[失败] " + summary
+		return "[失败]" + summary
 	default:
 		return summary
 	}
@@ -5141,7 +5141,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNewSessionCreated)+"\n请直接在当前聊天里发送任务。")
 	}
 }
 
@@ -6407,7 +6407,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		return
 	}
 
-	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
+	e.reply(p, msg.ReplyCtx, "已进入当前会话，请直接在当前聊天里发送任务。")
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
@@ -7152,7 +7152,7 @@ func helpCardGroups() []helpCardGroup {
 					"thread_title": "Codex｜等待任务",
 				}},
 				{command: "/list", action: "nav:/list"},
-				{command: "/current", action: "nav:/current", extra: map[string]string{
+				{command: "/current", action: "act:/current", extra: map[string]string{
 					"action_mode":  "thread_current_session",
 					"thread_title": "Codex｜当前会话",
 				}},
@@ -7269,7 +7269,7 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 				"action_mode":  "thread_new_session",
 				"thread_title": "Codex｜等待任务",
 			}},
-			CardButton{Text: "Current", Type: "default", Value: "nav:/current", Extra: map[string]string{
+			CardButton{Text: "Current", Type: "default", Value: "act:/current", Extra: map[string]string{
 				"action_mode":  "thread_current_session",
 				"thread_title": "Codex｜当前会话",
 			}},
@@ -7445,6 +7445,9 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 			"session_id":   item.agentID,
 			"session_name": name,
 		}
+		if name != "" {
+			currentExtra["session_title"] = name
+		}
 		newExtra := map[string]string{
 			"action_mode":   "thread_switch_session",
 			"thread_title":  sessionThreadTitle(agent.Name(), idx+1, name),
@@ -7454,7 +7457,7 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 		}
 		cb.ListItemActions(
 			desc,
-			CardButton{Text: "进入处理", Type: "primary", Value: "nav:/current", Extra: currentExtra},
+			CardButton{Text: "进入处理", Type: "primary", Value: "act:/current", Extra: currentExtra},
 			CardButton{Text: "新开线程", Type: "default", Value: "act:/switch", Extra: newExtra},
 		)
 	}

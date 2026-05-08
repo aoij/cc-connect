@@ -5192,7 +5192,7 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	} else if btn.Extra["action_mode"] != "thread_new_session" {
 		t.Fatalf("new-session action_mode = %q, want thread_new_session", btn.Extra["action_mode"])
 	}
-	if btn, ok := findCardAction(card, "nav:/current"); !ok {
+	if btn, ok := findCardAction(card, "act:/current"); !ok {
 		t.Fatal("expected current-session action")
 	} else if btn.Extra["action_mode"] != "thread_current_session" {
 		t.Fatalf("current-session action_mode = %q, want thread_current_session", btn.Extra["action_mode"])
@@ -12126,10 +12126,10 @@ func TestConversationTopicUpdatedDuringTaskLifecycle(t *testing.T) {
 	for time.Now().Before(deadline) {
 		titles := p.getTopicTitles()
 		if len(titles) >= 2 {
-			if titles[0] != "[进行中] 处理一下这个需求，顺便跑测试" {
+			if titles[0] != "[进行中]处理一下这个需求，顺便跑测试" {
 				t.Fatalf("first title = %q, want running title", titles[0])
 			}
-			if titles[len(titles)-1] != "[已完成] 处理一下这个需求，顺便跑测试" {
+			if titles[len(titles)-1] != "[已完成]处理一下这个需求，顺便跑测试" {
 				t.Fatalf("last title = %q, want done title", titles[len(titles)-1])
 			}
 			return

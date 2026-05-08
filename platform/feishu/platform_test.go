@@ -445,7 +445,7 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
+func TestInteractivePlatform_CardActionSwitchCreatesTaskChat(t *testing.T) {
 	platformAny, err := New(map[string]any{
 		"app_id":                    "cli_xxx",
 		"app_secret":                "secret",
@@ -458,32 +458,19 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 	}
 	ip := platformAny.(*interactivePlatform)
 
-	created := make(chan struct{}, 1)
-	ip.createThreadRootHook = func(_ context.Context, chatID, content string) (string, error) {
-		if chatID != "oc_test_chat" {
-			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
+	created := make(chan string, 1)
+	ip.createTaskChatHook = func(_ context.Context, userID, title string) (string, error) {
+		if userID != "ou_test_user" {
+			t.Fatalf("userID = %q, want ou_test_user", userID)
 		}
-		if content != "Codex #1｜chatgpt2api 分析当前部署" {
-			t.Fatalf("content = %q, want named switch topic title", content)
-		}
-		created <- struct{}{}
-		return "om_new_root", nil
-	}
-	ip.lookupThreadIDHook = func(rootID string) string {
-		if rootID != "om_new_root" {
-			t.Fatalf("rootID = %q, want om_new_root", rootID)
-		}
-		return "omt_new_topic"
+		created <- title
+		return "oc_task_chat", nil
 	}
 
 	msgCh := make(chan *core.Message, 1)
 	ip.handler = func(_ core.Platform, msg *core.Message) {
 		msgCh <- msg
 	}
-	aliasCh := make(chan [2]string, 1)
-	ip.SetCardSessionAliasRegistrar(func(aliasSessionKey, targetSessionKey string) {
-		aliasCh <- [2]string{aliasSessionKey, targetSessionKey}
-	})
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
@@ -504,34 +491,35 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 	}
 
 	select {
-	case <-created:
+	case title := <-created:
+		if title != "[进行中]chatgpt2api 分析当前部署" {
+			t.Fatalf("task chat title = %q, want [进行中]chatgpt2api 分析当前部署", title)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected createThreadRootHook to be called")
+		t.Fatal("expected createTaskChatHook to be called")
 	}
 
 	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_test_chat:root:om_new_root" {
-			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:om_new_root", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_task_chat:ou_test_user" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_task_chat:ou_test_user", msg.SessionKey)
+		}
+		if msg.ChannelKey != "oc_task_chat" {
+			t.Fatalf("ChannelKey = %q, want oc_task_chat", msg.ChannelKey)
 		}
 		if msg.Content != "/switch 1" {
 			t.Fatalf("Content = %q, want /switch 1", msg.Content)
 		}
+		rc, ok := msg.ReplyCtx.(replyContext)
+		if !ok || !rc.taskChat || rc.chatID != "oc_task_chat" || rc.messageID != "" {
+			t.Fatalf("ReplyCtx = %#v, want task chat context", msg.ReplyCtx)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action to dispatch a switch message")
 	}
-
-	select {
-	case alias := <-aliasCh:
-		if alias[0] != "feishu:oc_test_chat:root:omt_new_topic" || alias[1] != "feishu:oc_test_chat:root:om_new_root" {
-			t.Fatalf("alias registration = %#v, want topic alias to root session", alias)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected topic alias registration")
-	}
 }
 
-func TestInteractivePlatform_CardActionNewSessionCreatesThread(t *testing.T) {
+func TestInteractivePlatform_CardActionNewSessionCreatesTaskChat(t *testing.T) {
 	platformAny, err := New(map[string]any{
 		"app_id":             "cli_xxx",
 		"app_secret":         "secret",
@@ -543,14 +531,13 @@ func TestInteractivePlatform_CardActionNewSessionCreatesThread(t *testing.T) {
 	}
 	ip := platformAny.(*interactivePlatform)
 
-	ip.createThreadRootHook = func(_ context.Context, chatID, content string) (string, error) {
-		if chatID != "oc_test_chat" {
-			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
+	created := make(chan string, 1)
+	ip.createTaskChatHook = func(_ context.Context, userID, title string) (string, error) {
+		if userID != "ou_test_user" {
+			t.Fatalf("userID = %q, want ou_test_user", userID)
 		}
-		if content != "Codex｜等待任务" {
-			t.Fatalf("content = %q, want Codex｜等待任务", content)
-		}
-		return "om_new_root", nil
+		created <- title
+		return "oc_new_task_chat", nil
 	}
 
 	msgCh := make(chan *core.Message, 1)
@@ -577,12 +564,25 @@ func TestInteractivePlatform_CardActionNewSessionCreatesThread(t *testing.T) {
 	}
 
 	select {
+	case title := <-created:
+		if title != "[进行中]等待任务" {
+			t.Fatalf("task chat title = %q, want [进行中]等待任务", title)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected createTaskChatHook to be called")
+	}
+
+	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_test_chat:root:om_new_root" {
-			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:om_new_root", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_new_task_chat:ou_test_user" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_new_task_chat:ou_test_user", msg.SessionKey)
 		}
 		if msg.Content != "/new" {
 			t.Fatalf("Content = %q, want /new", msg.Content)
+		}
+		rc, ok := msg.ReplyCtx.(replyContext)
+		if !ok || !rc.taskChat || rc.chatID != "oc_new_task_chat" || rc.messageID != "" {
+			t.Fatalf("ReplyCtx = %#v, want task chat context", msg.ReplyCtx)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action to dispatch /new message")
@@ -631,7 +631,7 @@ func TestBuildCommandThreadTitleNamesTopLevelList(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_TopLevelCommandCreatesNamedTopic(t *testing.T) {
+func TestInteractivePlatform_TopLevelCommandDoesNotCreateNamedTopic(t *testing.T) {
 	platformAny, err := New(map[string]any{
 		"app_id":             "cli_xxx",
 		"app_secret":         "secret",
@@ -646,9 +646,6 @@ func TestInteractivePlatform_TopLevelCommandCreatesNamedTopic(t *testing.T) {
 
 	created := make(chan string, 1)
 	ip.createThreadRootHook = func(_ context.Context, chatID, content string) (string, error) {
-		if chatID != "oc_test_chat" {
-			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
-		}
 		created <- content
 		return "om_named_root", nil
 	}
@@ -694,23 +691,20 @@ func TestInteractivePlatform_TopLevelCommandCreatesNamedTopic(t *testing.T) {
 
 	select {
 	case title := <-created:
-		if title != "Codex｜会话列表" {
-			t.Fatalf("created topic title = %q, want Codex｜会话列表", title)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected createThreadRootHook to be called")
+		t.Fatalf("unexpected topic creation: %q", title)
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_test_chat:root:om_named_root" {
-			t.Fatalf("SessionKey = %q, want named topic root session", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_user_command" {
+			t.Fatalf("SessionKey = %q, want original root session", msg.SessionKey)
 		}
 		if msg.Content != "/list" {
 			t.Fatalf("Content = %q, want /list", msg.Content)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected command to dispatch through named topic")
+		t.Fatal("expected command to dispatch without named topic")
 	}
 }
 
@@ -1851,7 +1845,33 @@ func TestResolveMentions_UnknownMemberKeptAsIs(t *testing.T) {
 	}
 }
 
-func TestUpdateConversationTopicPrefersSessionRootMessage(t *testing.T) {
+func TestUpdateConversationTopicPrefersTaskChatTitle(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var gotChat string
+	var gotTitle string
+	p.updateTaskChatTitleHook = func(_ context.Context, chatID, title string) error {
+		gotChat = chatID
+		gotTitle = title
+		return nil
+	}
+
+	err := p.UpdateConversationTopic(context.Background(), replyContext{
+		chatID:     "oc_task_chat",
+		sessionKey: "feishu:oc_task_chat:ou_test_user",
+		taskChat:   true,
+	}, "[进行中] lazada一品多仓")
+	if err != nil {
+		t.Fatalf("UpdateConversationTopic() error = %v", err)
+	}
+	if gotChat != "oc_task_chat" {
+		t.Fatalf("chatID = %q, want oc_task_chat", gotChat)
+	}
+	if gotTitle != "[进行中] lazada一品多仓" {
+		t.Fatalf("title = %q, want running group title", gotTitle)
+	}
+}
+
+func TestUpdateConversationTopicLegacyTopicStillWorks(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	var gotRoot string
 	var gotTitle string
@@ -1875,32 +1895,21 @@ func TestUpdateConversationTopicPrefersSessionRootMessage(t *testing.T) {
 	if gotTitle != "[进行中] 处理一下这个需求" {
 		t.Fatalf("title = %q, want running title", gotTitle)
 	}
-	if remembered := p.topicRootTitle("om_topic_root", ""); remembered != gotTitle {
-		t.Fatalf("remembered title = %q, want %q", remembered, gotTitle)
-	}
-}
-
-func TestUpdateConversationTopicFallsBackToMessageIDForRootContext(t *testing.T) {
-	p := &Platform{platformName: "feishu"}
-	var gotRoot string
-	p.updateThreadRootHook = func(_ context.Context, rootID, _ string) error {
-		gotRoot = rootID
-		return nil
-	}
-
-	err := p.UpdateConversationTopic(context.Background(), replyContext{messageID: "om_new_root", chatID: "oc_chat"}, "[进行中] 新任务")
-	if err != nil {
-		t.Fatalf("UpdateConversationTopic() error = %v", err)
-	}
-	if gotRoot != "om_new_root" {
-		t.Fatalf("rootID = %q, want om_new_root", gotRoot)
-	}
 }
 
 func TestBuildActionThreadTitleIgnoresLegacyNewSessionTitle(t *testing.T) {
 	got := buildActionThreadTitle("thread_new_session", "/new", map[string]any{"thread_title": "Codex｜新会话"})
 	if got != "Codex｜等待任务" {
 		t.Fatalf("buildActionThreadTitle() = %q, want Codex｜等待任务", got)
+	}
+}
+
+func TestBuildActionTaskChatTitleUsesCompactStatusFormat(t *testing.T) {
+	got := buildActionTaskChatTitle("thread_switch_session", "/switch 2", map[string]any{
+		"session_name": "lazada一品多仓",
+	})
+	if got != "[进行中]lazada一品多仓" {
+		t.Fatalf("buildActionTaskChatTitle() = %q, want [进行中]lazada一品多仓", got)
 	}
 }
 
