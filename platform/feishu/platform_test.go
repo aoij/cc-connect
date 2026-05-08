@@ -673,8 +673,8 @@ func TestInteractivePlatform_BotCreatedTopicAllowsNoMentionRepliesByThreadID(t *
 
 	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_test_chat:root:omt_topic" {
-			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:omt_topic", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_card_message" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:om_card_message", msg.SessionKey)
 		}
 		if msg.Content != "continue in topic without mention" {
 			t.Fatalf("Content = %q, want no-mention topic text", msg.Content)
@@ -823,6 +823,29 @@ func TestFetchSingleMessageKeepsRawAppSenderID(t *testing.T) {
 	}
 	if msg.senderType != "app" {
 		t.Fatalf("senderType = %q, want app", msg.senderType)
+	}
+}
+
+func TestLearnBotThreadFromFetchedInteractiveMessageWithoutText(t *testing.T) {
+	body := `{"code":0,"data":{"items":[{"msg_type":"interactive","thread_id":"omt_topic","sender":{"id":"cli_bot","sender_type":"app"},"body":{"content":""}}]}}`
+	p := &Platform{
+		platformName: "feishu",
+		appID:        "cli_bot",
+		client:       lark.NewClient("cli_bot", "secret", lark.WithOpenBaseUrl(newFeishuJSONServer(t, body))),
+	}
+
+	if !p.learnBotThreadFromFetchedMessage("om_root") {
+		t.Fatal("learnBotThreadFromFetchedMessage returned false, want true for bot interactive card")
+	}
+	p.threadIsolation = true
+	if !p.isBotThreadMessage(&larkim.EventMessage{
+		MessageId: stringPtr("om_reply"),
+		RootId:    stringPtr("om_root"),
+		ThreadId:  stringPtr("omt_topic"),
+		ParentId:  stringPtr("om_root"),
+		ChatType:  stringPtr("group"),
+	}) {
+		t.Fatal("expected learned bot thread to allow no-mention replies")
 	}
 }
 

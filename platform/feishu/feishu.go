@@ -1197,13 +1197,56 @@ func (p *Platform) lookupThreadIDForRoot(ctx context.Context, rootID string) str
 	return threadID
 }
 
+type feishuMessageMeta struct {
+	senderID   string
+	senderType string
+	threadID   string
+}
+
+func (p *Platform) fetchMessageMeta(ctx context.Context, messageID string) *feishuMessageMeta {
+	if strings.TrimSpace(messageID) == "" || p.client == nil {
+		return nil
+	}
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
+	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		slog.Debug(p.tag()+": fetch message meta failed", "message_id", messageID, "error", err)
+		return nil
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []struct {
+				ThreadID string `json:"thread_id"`
+				Sender   struct {
+					ID         string `json:"id"`
+					SenderType string `json:"sender_type"`
+				} `json:"sender"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
+		slog.Debug(p.tag()+": fetch message meta: parse failed or no data", "message_id", messageID)
+		return nil
+	}
+	item := resp.Data.Items[0]
+	return &feishuMessageMeta{
+		senderID:   item.Sender.ID,
+		senderType: item.Sender.SenderType,
+		threadID:   item.ThreadID,
+	}
+}
+
 func (p *Platform) learnBotThreadFromFetchedMessage(rootID string) bool {
 	if rootID == "" {
 		return false
 	}
-	msg := p.fetchSingleMessage(context.Background(), rootID)
-	if msg == nil || msg.senderType != "app" || msg.senderID != p.appID {
+	meta := p.fetchMessageMeta(context.Background(), rootID)
+	if meta == nil || meta.senderType != "app" || meta.senderID != p.appID {
 		return false
+	}
+	if meta.threadID != "" {
+		p.markBotThreadID(meta.threadID)
 	}
 	p.markBotThreadRoot(rootID)
 	return true
@@ -2992,9 +3035,6 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
 		rootID := stringValue(msg.RootId)
-		if threadID := stringValue(msg.ThreadId); threadID != "" && rootID != "" && rootID != threadID && stringValue(msg.ParentId) != "" {
-			rootID = threadID
-		}
 		if rootID == "" {
 			rootID = stringValue(msg.ThreadId)
 		}
