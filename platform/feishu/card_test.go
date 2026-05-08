@@ -278,23 +278,14 @@ func TestRenderCardMap_ListItemActionsRenderAsCompactSessionCard(t *testing.T) {
 
 	got := decodeRenderedCard(t, card)
 	elements, ok := got["elements"].([]any)
-	if !ok || len(elements) != 1 {
-		t.Fatalf("elements = %#v, want one element", got["elements"])
+	if !ok || len(elements) != 2 {
+		t.Fatalf("elements = %#v, want markdown + button row", got["elements"])
 	}
-	row := elements[0].(map[string]any)
-	if row["background_style"] != "grey" {
-		t.Fatalf("background_style = %#v, want grey", row["background_style"])
+	textRow := elements[0].(map[string]any)
+	if textRow["tag"] != "markdown" {
+		t.Fatalf("first row tag = %#v, want markdown", textRow["tag"])
 	}
-	columns := row["columns"].([]any)
-	if len(columns) != 1 {
-		t.Fatalf("columns = %d, want one full-width content column", len(columns))
-	}
-	contentCol := columns[0].(map[string]any)
-	inner := contentCol["elements"].([]any)
-	if len(inner) != 2 {
-		t.Fatalf("content elements = %d, want markdown + button row", len(inner))
-	}
-	buttonRow := inner[1].(map[string]any)
+	buttonRow := elements[1].(map[string]any)
 	if buttonRow["tag"] != "column_set" || buttonRow["flex_mode"] != "trisect" {
 		t.Fatalf("button row = %#v, want trisect column_set", buttonRow)
 	}

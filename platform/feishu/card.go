@@ -178,7 +178,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				}
 			}
 		case core.CardListItem:
-			elements = append(elements, renderCardListItem(e, sessionKey))
+			elements = append(elements, renderCardListItemElements(e, sessionKey)...)
 		case core.CardSelect:
 			var options []map[string]any
 			for _, opt := range e.Options {
@@ -218,7 +218,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	return result
 }
 
-func renderCardListItem(e core.CardListItem, sessionKey string) map[string]any {
+func renderCardListItemElements(e core.CardListItem, sessionKey string) []map[string]any {
 	actionButtons := e.Actions
 	if len(actionButtons) == 0 {
 		actionButtons = []core.CardButton{{
@@ -257,20 +257,18 @@ func renderCardListItem(e core.CardListItem, sessionKey string) map[string]any {
 		content = " "
 	}
 
+	// Single-action list rows keep the compact legacy two-column layout used by
+	// other cards. It is known to be accepted by Feishu card JSON 1.0.
 	if len(actionButtons) <= 1 {
-		return map[string]any{
-			"tag":                "column_set",
-			"flex_mode":          "none",
-			"horizontal_spacing": "medium",
-			"margin":             "6px 0",
+		return []map[string]any{{
+			"tag":       "column_set",
+			"flex_mode": "none",
 			"columns": []map[string]any{
 				{
-					"tag":              "column",
-					"width":            "weighted",
-					"weight":           1,
-					"vertical_align":   "center",
-					"vertical_spacing": "small",
-					"padding":          "8px 10px",
+					"tag":            "column",
+					"width":          "weighted",
+					"weight":         6,
+					"vertical_align": "center",
 					"elements": []map[string]any{{
 						"tag":     "markdown",
 						"content": content,
@@ -278,13 +276,13 @@ func renderCardListItem(e core.CardListItem, sessionKey string) map[string]any {
 				},
 				{
 					"tag":              "column",
-					"width":            "100px",
+					"width":            "auto",
 					"vertical_align":   "center",
 					"horizontal_align": "right",
 					"elements":         buttonElements,
 				},
 			},
-		}
+		}}
 	}
 
 	buttonColumns := make([]map[string]any, 0, len(buttonElements))
@@ -299,34 +297,20 @@ func renderCardListItem(e core.CardListItem, sessionKey string) map[string]any {
 		})
 	}
 
-	return map[string]any{
-		"tag":                "column_set",
-		"flex_mode":          "none",
-		"horizontal_spacing": "medium",
-		"background_style":   "grey",
-		"margin":             "8px 0",
-		"columns": []map[string]any{
-			{
-				"tag":              "column",
-				"width":            "weighted",
-				"weight":           1,
-				"vertical_align":   "top",
-				"vertical_spacing": "small",
-				"padding":          "10px 12px",
-				"elements": []map[string]any{
-					{
-						"tag":     "markdown",
-						"content": content,
-					},
-					{
-						"tag":                "column_set",
-						"flex_mode":          "trisect",
-						"horizontal_spacing": "small",
-						"margin":             "6px 0 0 0",
-						"columns":            buttonColumns,
-					},
-				},
-			},
+	// Multi-action session rows are rendered as two stable JSON 1.0 elements:
+	// text above, equal-width buttons below. Avoid one-column column_set,
+	// background_style, padding and margin here; those combinations caused
+	// Feishu clients/callbacks to silently drop the card in some tenants.
+	return []map[string]any{
+		{
+			"tag":     "markdown",
+			"content": content,
+		},
+		{
+			"tag":                "column_set",
+			"flex_mode":          "trisect",
+			"horizontal_spacing": "default",
+			"columns":            buttonColumns,
 		},
 	}
 }

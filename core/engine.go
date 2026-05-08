@@ -8989,7 +8989,8 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 	if cs, ok := p.(CardSender); ok {
 		rendered := e.renderCardForPlatform(p, card)
 		if err := cs.ReplyCard(e.ctx, replyCtx, rendered); err != nil {
-			slog.Error("card reply failed", "platform", p.Name(), "error", err)
+			slog.Error("card reply failed, falling back to text", "platform", p.Name(), "error", err)
+			e.reply(p, replyCtx, rendered.RenderText())
 		}
 		return
 	}
@@ -9009,7 +9010,8 @@ func (e *Engine) sendWithCard(p Platform, replyCtx any, card *Card) {
 	if cs, ok := p.(CardSender); ok {
 		rendered := e.renderCardForPlatform(p, card)
 		if err := cs.SendCard(e.ctx, replyCtx, rendered); err != nil {
-			slog.Error("card send failed", "platform", p.Name(), "error", err)
+			slog.Error("card send failed, falling back to text", "platform", p.Name(), "error", err)
+			e.send(p, replyCtx, rendered.RenderText())
 		}
 		return
 	}
