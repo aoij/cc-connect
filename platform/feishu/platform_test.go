@@ -509,6 +509,125 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_BotCreatedThreadAllowsNoMentionReplies(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":           "cli_xxx",
+		"app_secret":       "secret",
+		"thread_isolation": true,
+		"group_reply_all":  false,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+	ip.markBotThreadRoot("om_root")
+
+	msgID := "om_reply"
+	rootID := "om_root"
+	chatID := "oc_test_chat"
+	userID := "ou_test_user"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"continue without mention"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &userID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				RootId:      &rootID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_root" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:om_root", msg.SessionKey)
+		}
+		if msg.Content != "continue without mention" {
+			t.Fatalf("Content = %q, want no-mention text", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected no-mention reply in bot-created thread to dispatch")
+	}
+}
+
+func TestInteractivePlatform_GroupMessageWithoutMentionOutsideBotThreadIgnored(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":           "cli_xxx",
+		"app_secret":       "secret",
+		"thread_isolation": true,
+		"group_reply_all":  false,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+
+	msgID := "om_regular_group_msg"
+	chatID := "oc_test_chat"
+	userID := "ou_test_user"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"do not wake bot"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &userID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		t.Fatalf("unexpected dispatch for regular no-mention group message: %#v", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {

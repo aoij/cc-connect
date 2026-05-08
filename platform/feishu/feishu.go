@@ -160,6 +160,8 @@ type Platform struct {
 	cardActionMsgMu      sync.Mutex
 	cardActionMsgIDs     map[string]string // sessionKey → messageID
 	createThreadRootHook func(ctx context.Context, chatID, content string) (string, error)
+	botThreadRootMu      sync.Mutex
+	botThreadRootIDs     map[string]time.Time // root messageID -> created time, allows no-mention replies in bot-created topics
 }
 
 type interactivePlatform struct {
@@ -557,6 +559,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 						Toast: &callback.Toast{Type: "error", Content: "创建新话题失败"},
 					}, nil
 				}
+				p.markBotThreadRoot(rootMsgID)
 				newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
 				newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
 				go p.handler(p.dispatchPlatform(), &core.Message{
@@ -1007,7 +1010,8 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"thread_isolation", p.threadIsolation,
 	)
 
-	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" {
+	allowNoMentionInBotThread := p.isBotThreadMessage(msg)
+	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" && !allowNoMentionInBotThread {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
 			if p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all") {
@@ -1061,6 +1065,51 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID)
 
 	return nil
+}
+
+const botThreadRootTTL = 24 * time.Hour
+
+func (p *Platform) markBotThreadRoot(rootID string) {
+	if rootID == "" {
+		return
+	}
+	p.botThreadRootMu.Lock()
+	defer p.botThreadRootMu.Unlock()
+	if p.botThreadRootIDs == nil {
+		p.botThreadRootIDs = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for id, createdAt := range p.botThreadRootIDs {
+		if now.Sub(createdAt) > botThreadRootTTL {
+			delete(p.botThreadRootIDs, id)
+		}
+	}
+	p.botThreadRootIDs[rootID] = now
+}
+
+func (p *Platform) isBotThreadMessage(msg *larkim.EventMessage) bool {
+	if msg == nil || !p.threadIsolation {
+		return false
+	}
+	rootID := stringValue(msg.RootId)
+	if rootID == "" || rootID == stringValue(msg.MessageId) {
+		return false
+	}
+
+	p.botThreadRootMu.Lock()
+	defer p.botThreadRootMu.Unlock()
+	if p.botThreadRootIDs == nil {
+		return false
+	}
+	createdAt, ok := p.botThreadRootIDs[rootID]
+	if !ok {
+		return false
+	}
+	if time.Since(createdAt) > botThreadRootTTL {
+		delete(p.botThreadRootIDs, rootID)
+		return false
+	}
+	return true
 }
 
 // dispatchMessage handles the message content parsing, media download, and
