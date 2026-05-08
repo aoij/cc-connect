@@ -159,14 +159,18 @@ type Platform struct {
 	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
-	cardActionMsgMu      sync.Mutex
-	cardActionMsgIDs     map[string]string // sessionKey → messageID
-	createThreadRootHook func(ctx context.Context, chatID, content string) (string, error)
-	botThreadRootMu      sync.Mutex
-	botThreadRootIDs     map[string]time.Time // root messageID -> created time, allows no-mention replies in bot-created topics
-	botThreadIDs         map[string]time.Time // topic threadID -> created time, covers Feishu topic replies whose root_id is the card/root message
-	threadSessionAliases map[string]string    // topic threadID -> canonical sessionKey, learned from card actions/replies
-	rootSessionAliases   map[string]string    // root/parent messageID -> canonical sessionKey, learned from card actions/replies
+	cardActionMsgMu           sync.Mutex
+	cardActionMsgIDs          map[string]string // sessionKey → messageID
+	createThreadRootHook      func(ctx context.Context, chatID, content string) (string, error)
+	updateThreadRootHook      func(ctx context.Context, rootID, content string) error
+	topicRootMu               sync.Mutex
+	topicRootTitleByMessageID map[string]string
+	topicRootTitleByThreadID  map[string]string
+	botThreadRootMu           sync.Mutex
+	botThreadRootIDs          map[string]time.Time // root messageID -> created time, allows no-mention replies in bot-created topics
+	botThreadIDs              map[string]time.Time // topic threadID -> created time, covers Feishu topic replies whose root_id is the card/root message
+	threadSessionAliases      map[string]string    // topic threadID -> canonical sessionKey, learned from card actions/replies
+	rootSessionAliases        map[string]string    // root/parent messageID -> canonical sessionKey, learned from card actions/replies
 }
 
 type interactivePlatform struct {
@@ -588,6 +592,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			}
 			p.markBotThreadRoot(rootMsgID)
 			newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+			p.rememberTopicRootTitle(rootMsgID, rootText)
 			newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
 			go func() {
 				p.handler(p.dispatchPlatform(), &core.Message{
@@ -623,6 +628,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				}
 				p.markBotThreadRoot(rootMsgID)
 				newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+				p.rememberTopicRootTitle(rootMsgID, rootText)
 				newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
 				go func() {
 					p.handler(p.dispatchPlatform(), &core.Message{
@@ -1128,6 +1134,9 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	threadID := stringValue(msg.ThreadId)
 	aliasSessionKey := p.botThreadSessionAlias(rootID, parentID, threadID)
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	if title := p.topicRootTitle(rootID, threadID); title != "" {
+		p.rememberTopicRootTitle(sessionKeyRootMessageID(sessionKey), title)
+	}
 	if aliasSessionKey != "" {
 		sessionKey = aliasSessionKey
 	}
@@ -1239,6 +1248,9 @@ func (p *Platform) registerThreadAliasFromRootAsync(chatID, rootID, sessionKey s
 	go func() {
 		if threadID, ok := p.waitForThreadIDForRoot(rootID, 20*time.Second); ok {
 			p.markBotThreadIDForSession(threadID, sessionKey)
+			if title := p.topicRootTitle(rootID, ""); title != "" {
+				p.rememberTopicThreadTitle(threadID, title)
+			}
 			if p.sessionAliasHook != nil {
 				p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, threadID), sessionKey)
 			}
@@ -1264,6 +1276,50 @@ func (p *Platform) waitForThreadIDForRoot(rootID string, timeout time.Duration) 
 			delay *= 2
 		}
 	}
+}
+
+func (p *Platform) rememberTopicRootTitle(rootID, title string) {
+	rootID = strings.TrimSpace(rootID)
+	title = strings.TrimSpace(title)
+	if rootID == "" || title == "" {
+		return
+	}
+	p.topicRootMu.Lock()
+	defer p.topicRootMu.Unlock()
+	if p.topicRootTitleByMessageID == nil {
+		p.topicRootTitleByMessageID = make(map[string]string)
+	}
+	p.topicRootTitleByMessageID[rootID] = title
+}
+
+func (p *Platform) rememberTopicThreadTitle(threadID, title string) {
+	threadID = strings.TrimSpace(threadID)
+	title = strings.TrimSpace(title)
+	if threadID == "" || title == "" {
+		return
+	}
+	p.topicRootMu.Lock()
+	defer p.topicRootMu.Unlock()
+	if p.topicRootTitleByThreadID == nil {
+		p.topicRootTitleByThreadID = make(map[string]string)
+	}
+	p.topicRootTitleByThreadID[threadID] = title
+}
+
+func (p *Platform) topicRootTitle(rootID, threadID string) string {
+	p.topicRootMu.Lock()
+	defer p.topicRootMu.Unlock()
+	if rootID != "" && p.topicRootTitleByMessageID != nil {
+		if title := p.topicRootTitleByMessageID[rootID]; title != "" {
+			return title
+		}
+	}
+	if threadID != "" && p.topicRootTitleByThreadID != nil {
+		if title := p.topicRootTitleByThreadID[threadID]; title != "" {
+			return title
+		}
+	}
+	return ""
 }
 
 func (p *Platform) lookupThreadIDForRoot(ctx context.Context, rootID string) string {
@@ -1379,6 +1435,9 @@ func (p *Platform) learnBotThreadFromFetchedMessage(rootID string) bool {
 	}
 	if meta.threadID != "" {
 		p.markBotThreadID(meta.threadID)
+		if title := p.topicRootTitle(rootID, ""); title != "" {
+			p.rememberTopicThreadTitle(meta.threadID, title)
+		}
 	}
 	p.markBotThreadRoot(rootID)
 	return true
@@ -3279,6 +3338,7 @@ func (p *Platform) createNamedCommandThreadIfNeeded(ctx context.Context, chatID,
 		return "", replyContext{}, false
 	}
 	newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+	p.rememberTopicRootTitle(rootMsgID, title)
 	p.markBotThreadRootForSession(rootMsgID, newSessionKey)
 	p.registerThreadAliasFromRootAsync(chatID, rootMsgID, newSessionKey)
 	return newSessionKey, replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}, true
@@ -3379,13 +3439,16 @@ func buildSwitchThreadTitle(target string, actionValue any) string {
 func buildActionThreadTitle(actionMode, command string, actionValue any) string {
 	if value, ok := actionValue.(map[string]any); ok {
 		if explicit, _ := value["thread_title"].(string); strings.TrimSpace(explicit) != "" {
-			return truncateThreadTitle(sanitizeThreadTitle(explicit), 48)
+			clean := truncateThreadTitle(sanitizeThreadTitle(explicit), 48)
+			if actionMode != "thread_new_session" || !strings.Contains(clean, "新会话") {
+				return clean
+			}
 		}
 	}
 
 	switch actionMode {
 	case "thread_new_session":
-		return "Codex｜新会话"
+		return "Codex｜等待任务"
 	case "thread_current_session":
 		return "Codex｜当前会话"
 	case "thread_switch_current", "thread_switch_session":
@@ -3431,7 +3494,11 @@ func truncateThreadTitle(title string, maxRunes int) string {
 
 func (p *Platform) createThreadRootMessage(ctx context.Context, chatID, content string) (string, error) {
 	if p.createThreadRootHook != nil {
-		return p.createThreadRootHook(ctx, chatID, content)
+		rootID, err := p.createThreadRootHook(ctx, chatID, content)
+		if err == nil {
+			p.rememberTopicRootTitle(rootID, content)
+		}
+		return rootID, err
 	}
 	msgType, msgBody := buildReplyContent(content)
 	req := larkim.NewCreateMessageReqBuilder().
@@ -3464,6 +3531,7 @@ func (p *Platform) createThreadRootMessage(ctx context.Context, chatID, content 
 	if msgID == "" {
 		return "", fmt.Errorf("%s: create thread root returned empty message id", p.tag())
 	}
+	p.rememberTopicRootTitle(msgID, content)
 	return msgID, nil
 }
 
@@ -3482,6 +3550,9 @@ func (p *Platform) learnReplyThreadAlias(ctx context.Context, rc replyContext, s
 	}
 	if threadID != "" {
 		p.markBotThreadIDForSession(threadID, rc.sessionKey)
+		if title := p.topicRootTitle(rootID, threadID); title != "" {
+			p.rememberTopicThreadTitle(threadID, title)
+		}
 		if p.sessionAliasHook != nil && rc.chatID != "" {
 			p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, threadID), rc.sessionKey)
 		}
@@ -3496,6 +3567,9 @@ func (p *Platform) learnReplyThreadAlias(ctx context.Context, rc replyContext, s
 		}
 		if meta := p.fetchMessageMeta(bgCtx, sentID); meta != nil && meta.threadID != "" {
 			p.markBotThreadIDForSession(meta.threadID, rc.sessionKey)
+			if title := p.topicRootTitle(rc.messageID, ""); title != "" {
+				p.rememberTopicThreadTitle(meta.threadID, title)
+			}
 			if p.sessionAliasHook != nil && rc.chatID != "" {
 				p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, meta.threadID), rc.sessionKey)
 			}
@@ -3756,12 +3830,19 @@ func parseThreadRootID(sessionTail string) (string, bool) {
 }
 
 func isThreadSessionKey(sessionKey string) bool {
+	return sessionKeyRootMessageID(sessionKey) != ""
+}
+
+func sessionKeyRootMessageID(sessionKey string) string {
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) != 3 {
-		return false
+		return ""
 	}
-	_, ok := parseThreadRootID(parts[2])
-	return ok
+	rootID, ok := parseThreadRootID(parts[2])
+	if !ok {
+		return ""
+	}
+	return rootID
 }
 
 // feishuPreviewHandle stores the message ID for an editable preview message.
@@ -4271,6 +4352,62 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	}
 
 	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
+}
+
+func (p *Platform) UpdateConversationTopic(ctx context.Context, rctx any, title string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	// In a topic turn rc.messageID is usually the user's latest message. The
+	// editable topic/root summary is the root id embedded in the session key, so
+	// prefer it and only fall back to messageID for freshly-created root contexts.
+	rootID := sessionKeyRootMessageID(rc.sessionKey)
+	if rootID == "" {
+		rootID = strings.TrimSpace(rc.messageID)
+	}
+	if rootID == "" {
+		return core.ErrNotSupported
+	}
+	title = truncateThreadTitle(sanitizeThreadTitle(title), 48)
+	if title == "" {
+		return nil
+	}
+	if p.updateThreadRootHook != nil {
+		if err := p.updateThreadRootHook(ctx, rootID, title); err != nil {
+			return err
+		}
+		p.rememberTopicRootTitle(rootID, title)
+		return nil
+	}
+	if err := p.updateTextMessage(ctx, rootID, title); err != nil {
+		return err
+	}
+	p.rememberTopicRootTitle(rootID, title)
+	return nil
+}
+
+func (p *Platform) updateTextMessage(ctx context.Context, messageID, content string) error {
+	msgBody, _ := json.Marshal(map[string]string{"text": content})
+	req := larkim.NewUpdateMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewUpdateMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypeText).
+			Content(string(msgBody)).
+			Build()).
+		Build()
+	return p.withTransientRetry(ctx, "update thread root", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "update thread root", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Update(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: update thread root: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: update thread root code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
 }
 
 // UpdateMessage edits an existing card message identified by previewHandle.

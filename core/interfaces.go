@@ -186,6 +186,13 @@ type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
 }
 
+// ConversationTopicUpdater is an optional interface for platforms that can
+// update a conversation/topic title or its root summary message for a running
+// task. It is best-effort; callers must continue even when it returns an error.
+type ConversationTopicUpdater interface {
+	UpdateConversationTopic(ctx context.Context, replyCtx any, title string) error
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".

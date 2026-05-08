@@ -547,8 +547,8 @@ func TestInteractivePlatform_CardActionNewSessionCreatesThread(t *testing.T) {
 		if chatID != "oc_test_chat" {
 			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
 		}
-		if content != "Codex｜新会话" {
-			t.Fatalf("content = %q, want Codex｜新会话", content)
+		if content != "Codex｜等待任务" {
+			t.Fatalf("content = %q, want Codex｜等待任务", content)
 		}
 		return "om_new_root", nil
 	}
@@ -564,7 +564,7 @@ func TestInteractivePlatform_CardActionNewSessionCreatesThread(t *testing.T) {
 			Action: &callback.CallBackAction{Value: map[string]any{
 				"action":       "act:/new",
 				"action_mode":  "thread_new_session",
-				"thread_title": "Codex｜新会话",
+				"thread_title": "Codex｜等待任务",
 			}},
 			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
 		},
@@ -1848,6 +1848,59 @@ func TestResolveMentions_UnknownMemberKeptAsIs(t *testing.T) {
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if strings.Contains(result, "<at") {
 		t.Fatalf("unknown member should not be replaced, got %q", result)
+	}
+}
+
+func TestUpdateConversationTopicPrefersSessionRootMessage(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var gotRoot string
+	var gotTitle string
+	p.updateThreadRootHook = func(_ context.Context, rootID, content string) error {
+		gotRoot = rootID
+		gotTitle = content
+		return nil
+	}
+
+	err := p.UpdateConversationTopic(context.Background(), replyContext{
+		messageID:  "om_user_reply",
+		chatID:     "oc_chat",
+		sessionKey: "feishu:oc_chat:root:om_topic_root",
+	}, "[进行中] 处理一下这个需求")
+	if err != nil {
+		t.Fatalf("UpdateConversationTopic() error = %v", err)
+	}
+	if gotRoot != "om_topic_root" {
+		t.Fatalf("rootID = %q, want om_topic_root", gotRoot)
+	}
+	if gotTitle != "[进行中] 处理一下这个需求" {
+		t.Fatalf("title = %q, want running title", gotTitle)
+	}
+	if remembered := p.topicRootTitle("om_topic_root", ""); remembered != gotTitle {
+		t.Fatalf("remembered title = %q, want %q", remembered, gotTitle)
+	}
+}
+
+func TestUpdateConversationTopicFallsBackToMessageIDForRootContext(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	var gotRoot string
+	p.updateThreadRootHook = func(_ context.Context, rootID, _ string) error {
+		gotRoot = rootID
+		return nil
+	}
+
+	err := p.UpdateConversationTopic(context.Background(), replyContext{messageID: "om_new_root", chatID: "oc_chat"}, "[进行中] 新任务")
+	if err != nil {
+		t.Fatalf("UpdateConversationTopic() error = %v", err)
+	}
+	if gotRoot != "om_new_root" {
+		t.Fatalf("rootID = %q, want om_new_root", gotRoot)
+	}
+}
+
+func TestBuildActionThreadTitleIgnoresLegacyNewSessionTitle(t *testing.T) {
+	got := buildActionThreadTitle("thread_new_session", "/new", map[string]any{"thread_title": "Codex｜新会话"})
+	if got != "Codex｜等待任务" {
+		t.Fatalf("buildActionThreadTitle() = %q, want Codex｜等待任务", got)
 	}
 }
 

@@ -12087,6 +12087,58 @@ func (s *codexLikeSession) CurrentSessionID() string {
 func (s *codexLikeSession) Alive() bool  { return s.alive }
 func (s *codexLikeSession) Close() error { s.alive = false; return nil }
 
+type stubTopicUpdatePlatform struct {
+	stubPlatformEngine
+	titles []string
+	ctxs   []any
+}
+
+func (p *stubTopicUpdatePlatform) UpdateConversationTopic(_ context.Context, replyCtx any, title string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ctxs = append(p.ctxs, replyCtx)
+	p.titles = append(p.titles, title)
+	return nil
+}
+
+func (p *stubTopicUpdatePlatform) getTopicTitles() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.titles))
+	copy(out, p.titles)
+	return out
+}
+
+func TestConversationTopicUpdatedDuringTaskLifecycle(t *testing.T) {
+	sess := newCodexLikeSession("codex-topic-thread-001")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubTopicUpdatePlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: "feishu:oc_chat:root:om_topic_root",
+		Platform:   "feishu",
+		Content:    "处理一下这个需求，顺便跑测试",
+		ReplyCtx:   "topic-ctx",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		titles := p.getTopicTitles()
+		if len(titles) >= 2 {
+			if titles[0] != "[进行中] 处理一下这个需求，顺便跑测试" {
+				t.Fatalf("first title = %q, want running title", titles[0])
+			}
+			if titles[len(titles)-1] != "[已完成] 处理一下这个需求，顺便跑测试" {
+				t.Fatalf("last title = %q, want done title", titles[len(titles)-1])
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected running and done topic updates, got %#v", p.getTopicTitles())
+}
+
 // TestSessionName_CodexLikeFlow does an end-to-end test simulating real codex
 // behavior: CurrentSessionID()="" initially, thread ID only available after Send().
 // This is the exact bug: /new xxx → send message → agent replies with SessionID

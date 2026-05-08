@@ -305,6 +305,8 @@ type interactiveState struct {
 	approveAll             bool            // when true, auto-approve all permission requests for this session
 	fromVoice              bool            // true if current turn originated from voice transcription
 	sideText               string
+	taskTitle              string
+	topicStatus            string
 	deleteMode             *deleteModeState
 	modelSwitch            *modelSwitchState
 	pendingProviderAdd     *pendingProviderAddState
@@ -2252,6 +2254,82 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 	}
 }
 
+func (e *Engine) updateConversationTopic(state *interactiveState, replyCtx any, status, userText string) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	title := taskTopicTitle(status, userText, state.taskTitle)
+	if title == "" || (state.topicStatus == status && state.taskTitle == title) {
+		state.mu.Unlock()
+		return
+	}
+	state.topicStatus = status
+	state.taskTitle = title
+	p := state.platform
+	if replyCtx == nil {
+		replyCtx = state.replyCtx
+	}
+	state.mu.Unlock()
+
+	updater, ok := p.(ConversationTopicUpdater)
+	if !ok || updater == nil || replyCtx == nil {
+		return
+	}
+	if err := updater.UpdateConversationTopic(e.ctx, replyCtx, title); err != nil {
+		slog.Debug("conversation topic update failed", "platform", p.Name(), "title", title, "error", err)
+	}
+}
+
+func taskTopicTitle(status, userText, previousTitle string) string {
+	summary := summarizeTaskTitle(userText, 28)
+	if summary == "" {
+		summary = stripTaskTopicStatus(previousTitle)
+	}
+	if summary == "" {
+		summary = "等待任务"
+	}
+	switch status {
+	case "running":
+		return "[进行中] " + summary
+	case "done":
+		return "[已完成] " + summary
+	case "failed":
+		return "[失败] " + summary
+	default:
+		return summary
+	}
+}
+
+func stripTaskTopicStatus(title string) string {
+	title = strings.TrimSpace(title)
+	for _, prefix := range []string{"[进行中]", "[已完成]", "[失败]"} {
+		if strings.HasPrefix(title, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(title, prefix))
+		}
+	}
+	return title
+}
+
+func summarizeTaskTitle(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+	text = strings.Trim(text, "`*_#> -—:：，,。.!！?？/\\|[]()（）{}《》")
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if maxRunes <= 0 || len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes]) + "…"
+}
+
 // drainOrphanedQueue is called when a message was queued but the drain loop
 // has already exited. It processes all pending messages in the state, similar
 // to the drain loop in processInteractiveMessageWith but as a standalone
@@ -2618,6 +2696,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			}
 		}
 	}
+
+	e.updateConversationTopic(state, msg.ReplyCtx, "running", msg.Content)
 
 	// Start typing indicator if platform supports it.
 	// Ownership is transferred to processInteractiveEvents which manages
@@ -3230,6 +3310,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 			// Mark workspace active on first event.
 			if !turnActive {
+				e.updateConversationTopic(state, nil, "running", "")
 				turnActive = true
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
@@ -3269,6 +3350,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventResult:
+				e.updateConversationTopic(state, replyCtx, "done", "")
 				fullResponse := event.Content
 				if fullResponse == "" && len(textParts) > 0 {
 					fullResponse = strings.Join(textParts, "")
@@ -3904,6 +3986,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventResult:
 			cp.Finalize(ProgressCardStateCompleted)
+			resultTopicStatus := "done"
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
 			// to not be persisted to disk, breaking session resume on next startup.
@@ -4032,6 +4115,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
 			// preventing a stray done_emoji push.
 			if isSilent {
+				resultTopicStatus = "done"
 				sp.discard()
 				// Rich mode: cardMessageID is tracked independently of sp.previewMsgID,
 				// so sp.discard() doesn't reach it. Without this cleanup the rich card
@@ -4048,6 +4132,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Info("silent reply suppressed", "session", session.ID)
 			} else if hasRichCard {
+				resultTopicStatus = "done"
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
@@ -4077,6 +4162,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 			} else if toolCount > 0 && segmentStart > 0 {
+				resultTopicStatus = "done"
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
@@ -4092,6 +4178,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 			} else if suppressDuplicate {
+				resultTopicStatus = "done"
 				sp.discard()
 				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
 					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
@@ -4102,6 +4189,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
 			} else if normalizedBaseResponse != "" && sideText != "" && strings.HasPrefix(normalizedBaseResponse, sideText) {
+				resultTopicStatus = "done"
 				sp.discard()
 				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
 					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
@@ -4112,6 +4200,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Debug("EventResult: suppressed prefix duplicate final text", "response_len", len(fullResponse))
 			} else {
+				resultTopicStatus = "done"
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
 					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
@@ -4119,6 +4208,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 			}
+
+			e.updateConversationTopic(state, replyCtx, resultTopicStatus, "")
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
@@ -4184,6 +4275,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping()
 					stopTyping = nil
 				}
+				e.updateConversationTopic(state, queued.replyCtx, "running", queued.content)
+
 				// Start a new typing indicator for the queued message's context
 				if ti, ok := queued.platform.(TypingIndicator); ok {
 					stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
@@ -4275,6 +4368,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
+			e.updateConversationTopic(state, replyCtx, "failed", "")
 			sp.discard()
 			state.mu.Lock()
 			state.eventsNeedResync = true
@@ -4472,6 +4566,8 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		go func() {
 			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
 		}()
+
+		e.updateConversationTopic(state, queued.replyCtx, "running", queued.content)
 
 		var stopTyping func()
 		if ti, ok := queued.platform.(TypingIndicator); ok {
@@ -7053,7 +7149,7 @@ func helpCardGroups() []helpCardGroup {
 			items: []helpCardItem{
 				{command: "/new", action: "act:/new", extra: map[string]string{
 					"action_mode":  "thread_new_session",
-					"thread_title": "Codex｜新会话",
+					"thread_title": "Codex｜等待任务",
 				}},
 				{command: "/list", action: "nav:/list"},
 				{command: "/current", action: "nav:/current", extra: map[string]string{
@@ -7171,7 +7267,7 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 			PrimaryBtn("Session List", "nav:/list"),
 			CardButton{Text: "New Session", Type: "default", Value: "act:/new", Extra: map[string]string{
 				"action_mode":  "thread_new_session",
-				"thread_title": "Codex｜新会话",
+				"thread_title": "Codex｜等待任务",
 			}},
 			CardButton{Text: "Current", Type: "default", Value: "nav:/current", Extra: map[string]string{
 				"action_mode":  "thread_current_session",
