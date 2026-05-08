@@ -31,7 +31,12 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 		}
 		return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 	}
-	return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	sentID, rootID, parentID, threadID, err := p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	if err != nil {
+		return err
+	}
+	p.learnReplyThreadAlias(ctx, rc, sentID, rootID, parentID, threadID)
+	return nil
 }
 
 // SendCard sends a structured card as a new message to the chat.
@@ -300,11 +305,11 @@ func renderCardListItemElements(e core.CardListItem, sessionKey string) []map[st
 		})
 	}
 
-	// Multi-action session rows are rendered as two stable JSON 1.0 elements:
-	// text above, equal-width buttons below. Avoid one-column column_set,
-	// background_style, padding and margin here; those combinations caused
-	// Feishu clients/callbacks to silently drop the card in some tenants.
-	return []map[string]any{
+	// Multi-action session rows are rendered as a compact list-like block:
+	// one text row, one equal-width button row, then a subtle divider. Avoid
+	// background_style/padding/margin because those combinations caused Feishu
+	// clients/callbacks to silently drop the card in some tenants.
+	rows := []map[string]any{
 		{
 			"tag":     "markdown",
 			"content": content,
@@ -316,6 +321,8 @@ func renderCardListItemElements(e core.CardListItem, sessionKey string) []map[st
 			"columns":            buttonColumns,
 		},
 	}
+	rows = append(rows, map[string]any{"tag": "hr"})
+	return rows
 }
 
 type deleteModeCheckerRow struct {

@@ -5002,7 +5002,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 		t.Fatalf("renderListCard returned error: %v", err)
 	}
 
-	if got := countCardActionValues(card, "act:/switch "); got != len(sessions)*2 {
+	if got := countCardActionValues(card, "act:/switch "); got != len(sessions) {
 		t.Fatalf("switch action count = %d, want %d", got, len(sessions))
 	}
 
@@ -5013,9 +5013,15 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	if btn.Type != "primary_filled" {
 		t.Fatalf("active session button type = %q, want primary_filled", btn.Type)
 	}
+	if btn.Text != "继续" {
+		t.Fatalf("active session button text = %q, want 继续", btn.Text)
+	}
+	if btn.Extra["action_mode"] != "switch_session" {
+		t.Fatalf("switch action_mode = %q, want switch_session", btn.Extra["action_mode"])
+	}
 }
 
-func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
+func TestRenderListCard_SessionRowsLookLikeCodexThreadList(t *testing.T) {
 	sessions := []AgentSessionInfo{
 		{ID: "session-1", Summary: "Session one", MessageCount: 1, ModifiedAt: time.Now()},
 	}
@@ -5027,33 +5033,24 @@ func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderListCard returned error: %v", err)
 	}
-	if len(card.Elements) == 0 {
-		t.Fatal("expected card elements")
+	if len(card.Elements) < 2 {
+		t.Fatalf("expected intro + session row elements, got %d", len(card.Elements))
 	}
-	item, ok := card.Elements[0].(CardListItem)
+	item, ok := card.Elements[1].(CardListItem)
 	if !ok {
-		t.Fatalf("first element = %T, want CardListItem", card.Elements[0])
+		t.Fatalf("second element = %T, want CardListItem", card.Elements[1])
 	}
-	if len(item.Actions) != 3 {
-		t.Fatalf("actions = %d, want 3", len(item.Actions))
+	if !strings.Contains(item.Text, "Session one") || !strings.Contains(item.Text, "1 条消息") {
+		t.Fatalf("item text = %q, want title and message count", item.Text)
 	}
-	if item.Actions[0].Text != "进入当前" || item.Actions[0].Value != "act:/switch 1" {
-		t.Fatalf("first action = %#v, want enter switch", item.Actions[0])
+	if item.BtnText != "继续" || item.BtnValue != "act:/switch 1" || item.BtnType != "primary_filled" {
+		t.Fatalf("item button = text:%q type:%q value:%q, want primary continue switch", item.BtnText, item.BtnType, item.BtnValue)
 	}
-	if item.Actions[0].Extra["action_mode"] == "switch_session" {
-		t.Fatalf("enter action should not create a new thread: %#v", item.Actions[0].Extra)
+	if item.Extra["action_mode"] != "switch_session" {
+		t.Fatalf("action_mode = %q, want switch_session", item.Extra["action_mode"])
 	}
-	if item.Actions[1].Text != "开新话题" || item.Actions[1].Value != "act:/switch 1" {
-		t.Fatalf("second action = %#v, want new topic switch", item.Actions[1])
-	}
-	if item.Actions[1].Extra["action_mode"] != "switch_session" {
-		t.Fatalf("new topic action_mode = %q, want switch_session", item.Actions[1].Extra["action_mode"])
-	}
-	if item.Actions[1].Extra["session_title"] != "Session one" {
-		t.Fatalf("session_title = %q, want Session one", item.Actions[1].Extra["session_title"])
-	}
-	if item.Actions[2].Text != "删除" || item.Actions[2].Value != "act:/delete-one ask 1" || item.Actions[2].Type != "danger" {
-		t.Fatalf("third action = %#v, want delete-one ask", item.Actions[2])
+	if item.Extra["session_title"] != "Session one" {
+		t.Fatalf("session_title = %q, want Session one", item.Extra["session_title"])
 	}
 }
 

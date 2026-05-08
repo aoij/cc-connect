@@ -684,6 +684,74 @@ func TestInteractivePlatform_BotCreatedTopicAllowsNoMentionRepliesByThreadID(t *
 	}
 }
 
+func TestInteractivePlatform_BotTopicNoMentionUsesCanonicalSessionAlias(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":           "cli_xxx",
+		"app_secret":       "secret",
+		"thread_isolation": true,
+		"group_reply_all":  false,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+	ip.markBotThreadIDForSession("omt_topic", "feishu:oc_test_chat:root:om_original_root")
+
+	msgID := "om_reply"
+	rootID := "om_feishu_topic_root"
+	threadID := "omt_topic"
+	parentID := "om_feishu_topic_root"
+	chatID := "oc_test_chat"
+	userID := "ou_test_user"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"continue in aliased topic"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &userID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				RootId:      &rootID,
+				ParentId:    &parentID,
+				ThreadId:    &threadID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_original_root" {
+			t.Fatalf("SessionKey = %q, want canonical root alias", msg.SessionKey)
+		}
+		if msg.Content != "continue in aliased topic" {
+			t.Fatalf("Content = %q, want no-mention topic text", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected no-mention reply in aliased bot topic to dispatch")
+	}
+}
+
 func TestInteractivePlatform_GroupMessageWithoutMentionOutsideBotThreadIgnored(t *testing.T) {
 	platformAny, err := New(map[string]any{
 		"app_id":           "cli_xxx",
@@ -846,6 +914,58 @@ func TestLearnBotThreadFromFetchedInteractiveMessageWithoutText(t *testing.T) {
 		ChatType:  stringPtr("group"),
 	}) {
 		t.Fatal("expected learned bot thread to allow no-mention replies")
+	}
+}
+
+func TestFetchMessageMetaUsesFreshTenantTokenRetry(t *testing.T) {
+	var mu sync.Mutex
+	var msgRequests int
+	var tokenRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/im/v1/messages/om_root":
+			mu.Lock()
+			msgRequests++
+			current := msgRequests
+			mu.Unlock()
+			if current == 1 {
+				_, _ = w.Write([]byte(`{"code":99991663,"msg":"tenant access token invalid"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"items":[{"msg_type":"interactive","thread_id":"omt_topic","sender":{"id":"cli_bot","sender_type":"app"},"body":{"content":""}}]}}`))
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			mu.Lock()
+			tokenRequests++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","tenant_access_token":"fresh-token"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		appID:        "cli_bot",
+		appSecret:    "secret",
+		client:       lark.NewClient("cli_bot", "secret", lark.WithOpenBaseUrl(srv.URL)),
+		replayClient: lark.NewClient("cli_bot", "secret", lark.WithOpenBaseUrl(srv.URL)),
+	}
+
+	meta := p.fetchMessageMeta(context.Background(), "om_root")
+	if meta == nil {
+		t.Fatal("fetchMessageMeta returned nil")
+	}
+	if meta.threadID != "omt_topic" || meta.senderType != "app" || meta.senderID != "cli_bot" {
+		t.Fatalf("meta = %#v, want bot app thread meta", meta)
+	}
+	mu.Lock()
+	gotMsgRequests := msgRequests
+	gotTokenRequests := tokenRequests
+	mu.Unlock()
+	if gotMsgRequests < 2 || gotTokenRequests < 1 {
+		t.Fatalf("msgRequests=%d tokenRequests=%d, want fetch retry after token refresh", gotMsgRequests, gotTokenRequests)
 	}
 }
 

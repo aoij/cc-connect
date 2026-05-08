@@ -165,6 +165,8 @@ type Platform struct {
 	botThreadRootMu      sync.Mutex
 	botThreadRootIDs     map[string]time.Time // root messageID -> created time, allows no-mention replies in bot-created topics
 	botThreadIDs         map[string]time.Time // topic threadID -> created time, covers Feishu topic replies whose root_id is the card/root message
+	threadSessionAliases map[string]string    // topic threadID -> canonical sessionKey, learned from card actions/replies
+	rootSessionAliases   map[string]string    // root/parent messageID -> canonical sessionKey, learned from card actions/replies
 }
 
 type interactivePlatform struct {
@@ -1069,11 +1071,18 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
+	rootID := stringValue(msg.RootId)
+	threadID := stringValue(msg.ThreadId)
+	aliasSessionKey := p.botThreadSessionAlias(rootID, parentID, threadID)
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	if aliasSessionKey != "" {
+		sessionKey = aliasSessionKey
+	}
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
+		"alias_session_key", aliasSessionKey,
 		"reply_in_thread", p.shouldReplyInThread(rctx),
 	)
 
@@ -1107,6 +1116,37 @@ func (p *Platform) markBotThreadRoot(rootID string) {
 }
 
 func (p *Platform) markBotThreadID(threadID string) {
+	p.markBotThreadIDForSession(threadID, "")
+}
+
+func (p *Platform) markBotThreadRootForSession(rootID, sessionKey string) {
+	if rootID == "" {
+		return
+	}
+	p.botThreadRootMu.Lock()
+	defer p.botThreadRootMu.Unlock()
+	if p.botThreadRootIDs == nil {
+		p.botThreadRootIDs = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for id, createdAt := range p.botThreadRootIDs {
+		if now.Sub(createdAt) > botThreadRootTTL {
+			delete(p.botThreadRootIDs, id)
+			if p.rootSessionAliases != nil {
+				delete(p.rootSessionAliases, id)
+			}
+		}
+	}
+	p.botThreadRootIDs[rootID] = now
+	if sessionKey != "" {
+		if p.rootSessionAliases == nil {
+			p.rootSessionAliases = make(map[string]string)
+		}
+		p.rootSessionAliases[rootID] = sessionKey
+	}
+}
+
+func (p *Platform) markBotThreadIDForSession(threadID, sessionKey string) {
 	if threadID == "" {
 		return
 	}
@@ -1119,18 +1159,28 @@ func (p *Platform) markBotThreadID(threadID string) {
 	for id, createdAt := range p.botThreadIDs {
 		if now.Sub(createdAt) > botThreadRootTTL {
 			delete(p.botThreadIDs, id)
+			if p.threadSessionAliases != nil {
+				delete(p.threadSessionAliases, id)
+			}
 		}
 	}
 	p.botThreadIDs[threadID] = now
+	if sessionKey != "" {
+		if p.threadSessionAliases == nil {
+			p.threadSessionAliases = make(map[string]string)
+		}
+		p.threadSessionAliases[threadID] = sessionKey
+	}
 }
 
 func (p *Platform) registerThreadAliasFromRootAsync(chatID, rootID, sessionKey string) {
 	if chatID == "" || rootID == "" || sessionKey == "" {
 		return
 	}
+	p.markBotThreadRootForSession(rootID, sessionKey)
 	go func() {
 		if threadID, ok := p.waitForThreadIDForRoot(rootID, 20*time.Second); ok {
-			p.markBotThreadID(threadID)
+			p.markBotThreadIDForSession(threadID, sessionKey)
 			if p.sessionAliasHook != nil {
 				p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, threadID), sessionKey)
 			}
@@ -1208,13 +1258,25 @@ func (p *Platform) fetchMessageMeta(ctx context.Context, messageID string) *feis
 		return nil
 	}
 	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
-	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
+	var apiResp *larkcore.ApiResp
+	err := p.withTransientRetry(ctx, "fetch message meta", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "fetch message meta", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			var err error
+			apiResp, err = client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
+			return err
+		})
+	})
 	if err != nil {
-		slog.Debug(p.tag()+": fetch message meta failed", "message_id", messageID, "error", err)
+		slog.Warn(p.tag()+": fetch message meta failed", "message_id", messageID, "error", err)
+		return nil
+	}
+	if apiResp == nil {
+		slog.Warn(p.tag()+": fetch message meta returned nil response", "message_id", messageID)
 		return nil
 	}
 	var resp struct {
-		Code int `json:"code"`
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
 		Data struct {
 			Items []struct {
 				ThreadID string `json:"thread_id"`
@@ -1225,8 +1287,12 @@ func (p *Platform) fetchMessageMeta(ctx context.Context, messageID string) *feis
 			} `json:"items"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
-		slog.Debug(p.tag()+": fetch message meta: parse failed or no data", "message_id", messageID)
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		slog.Warn(p.tag()+": fetch message meta parse failed", "message_id", messageID, "error", err)
+		return nil
+	}
+	if resp.Code != 0 || len(resp.Data.Items) == 0 {
+		slog.Warn(p.tag()+": fetch message meta returned no usable data", "message_id", messageID, "code", resp.Code, "msg", resp.Msg, "items", len(resp.Data.Items))
 		return nil
 	}
 	item := resp.Data.Items[0]
@@ -1243,6 +1309,14 @@ func (p *Platform) learnBotThreadFromFetchedMessage(rootID string) bool {
 	}
 	meta := p.fetchMessageMeta(context.Background(), rootID)
 	if meta == nil || meta.senderType != "app" || meta.senderID != p.appID {
+		if meta != nil {
+			slog.Info(p.tag()+": fetched thread root is not this bot",
+				"message_id", rootID,
+				"sender_type", meta.senderType,
+				"sender_id_matches_app", meta.senderID == p.appID,
+				"thread_id", meta.threadID,
+			)
+		}
 		return false
 	}
 	if meta.threadID != "" {
@@ -1304,6 +1378,40 @@ func (p *Platform) isBotThreadMessage(msg *larkim.EventMessage) bool {
 		return true
 	}
 	return false
+}
+
+func (p *Platform) botThreadSessionAlias(rootID, parentID, threadID string) string {
+	p.botThreadRootMu.Lock()
+	defer p.botThreadRootMu.Unlock()
+	now := time.Now()
+	if p.threadSessionAliases != nil && threadID != "" {
+		if createdAt, ok := p.botThreadIDs[threadID]; ok {
+			if now.Sub(createdAt) <= botThreadRootTTL {
+				if alias := p.threadSessionAliases[threadID]; alias != "" {
+					return alias
+				}
+			}
+			delete(p.botThreadIDs, threadID)
+			delete(p.threadSessionAliases, threadID)
+		}
+	}
+	if p.rootSessionAliases != nil {
+		for _, id := range []string{rootID, parentID} {
+			if id == "" {
+				continue
+			}
+			if createdAt, ok := p.botThreadRootIDs[id]; ok {
+				if now.Sub(createdAt) <= botThreadRootTTL {
+					if alias := p.rootSessionAliases[id]; alias != "" {
+						return alias
+					}
+				}
+				delete(p.botThreadRootIDs, id)
+				delete(p.rootSessionAliases, id)
+			}
+		}
+	}
+	return ""
 }
 
 // dispatchMessage handles the message content parsing, media download, and
@@ -2424,7 +2532,12 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 	}
-	return p.replyMessage(ctx, rc, msgType, msgBody)
+	sentID, rootID, parentID, threadID, err := p.replyMessage(ctx, rc, msgType, msgBody)
+	if err != nil {
+		return err
+	}
+	p.learnReplyThreadAlias(ctx, rc, sentID, rootID, parentID, threadID)
+	return nil
 }
 
 // Send sends a message. When the original message ID is available, the message
@@ -2533,7 +2646,12 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 func (p *Platform) sendMediaMessage(ctx context.Context, rc replyContext, msgType, content string) error {
 	if p.shouldUseThreadOrReplyAPI(rc) {
-		return p.replyMessage(ctx, rc, msgType, content)
+		sentID, rootID, parentID, threadID, err := p.replyMessage(ctx, rc, msgType, content)
+		if err != nil {
+			return err
+		}
+		p.learnReplyThreadAlias(ctx, rc, sentID, rootID, parentID, threadID)
+		return nil
 	}
 	return p.createMessage(ctx, rc.chatID, msgType, content, "send media message")
 }
@@ -3132,6 +3250,42 @@ func (p *Platform) createThreadRootMessage(ctx context.Context, chatID, content 
 	return msgID, nil
 }
 
+func (p *Platform) learnReplyThreadAlias(ctx context.Context, rc replyContext, sentID, rootID, parentID, threadID string) {
+	if !p.threadIsolation || rc.sessionKey == "" {
+		return
+	}
+	if sentID != "" {
+		p.markBotThreadRootForSession(sentID, rc.sessionKey)
+	}
+	if rootID != "" {
+		p.markBotThreadRootForSession(rootID, rc.sessionKey)
+	}
+	if parentID != "" {
+		p.markBotThreadRootForSession(parentID, rc.sessionKey)
+	}
+	if threadID != "" {
+		p.markBotThreadIDForSession(threadID, rc.sessionKey)
+		if p.sessionAliasHook != nil && rc.chatID != "" {
+			p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, threadID), rc.sessionKey)
+		}
+	}
+	if rc.messageID != "" {
+		p.markBotThreadRootForSession(rc.messageID, rc.sessionKey)
+	}
+	bgCtx := context.Background()
+	go func() {
+		if sentID == "" || threadID != "" {
+			return
+		}
+		if meta := p.fetchMessageMeta(bgCtx, sentID); meta != nil && meta.threadID != "" {
+			p.markBotThreadIDForSession(meta.threadID, rc.sessionKey)
+			if p.sessionAliasHook != nil && rc.chatID != "" {
+				p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), rc.chatID, meta.threadID), rc.sessionKey)
+			}
+		}
+	}()
+}
+
 func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
 	if rc.chatID == "" {
 		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
@@ -3149,12 +3303,16 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 	return body.Build()
 }
 
-func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) (string, string, string, string, error) {
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	var sentID string
+	var rootID string
+	var parentID string
+	var threadID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Reply(ctx, req, options...)
 			if err != nil {
@@ -3163,9 +3321,18 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				sentID = *resp.Data.MessageId
+			}
+			if resp.Data != nil {
+				rootID = stringValue(resp.Data.RootId)
+				parentID = stringValue(resp.Data.ParentId)
+				threadID = stringValue(resp.Data.ThreadId)
+			}
 			return nil
 		})
 	})
+	return sentID, rootID, parentID, threadID, err
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
@@ -3845,6 +4012,13 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		if resp.Data != nil && resp.Data.MessageId != nil {
 			msgID = *resp.Data.MessageId
 		}
+		var rootID, parentID, threadID string
+		if resp.Data != nil {
+			rootID = stringValue(resp.Data.RootId)
+			parentID = stringValue(resp.Data.ParentId)
+			threadID = stringValue(resp.Data.ThreadId)
+		}
+		p.learnReplyThreadAlias(ctx, rc, msgID, rootID, parentID, threadID)
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().
 			ReceiveIdType(larkim.ReceiveIdTypeChatId).
