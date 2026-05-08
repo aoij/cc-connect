@@ -1217,10 +1217,6 @@ func (p *Platform) isTaskChatGroup(chatID string) bool {
 	if chatID == "" {
 		return false
 	}
-	allowChat := strings.TrimSpace(p.allowChat)
-	if allowChat == "" || allowChat == "*" || !core.AllowList(allowChat, chatID) {
-		return false
-	}
 	if cached, ok := p.chatNameCache.Load(chatID); ok {
 		if isTaskChatTitle(cached.(string)) {
 			p.markBotTaskChat(chatID)
