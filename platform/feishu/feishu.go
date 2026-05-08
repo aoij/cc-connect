@@ -551,7 +551,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if actionMode == "switch_session" {
 			target := strings.TrimSpace(strings.TrimPrefix(actionVal, "act:/switch "))
 			if target != "" {
-				rootText := fmt.Sprintf("切换会话 #%s", target)
+				rootText := buildSwitchThreadTitle(target, event.Event.Action.Value["session_title"])
 				rootMsgID, err := p.createThreadRootMessage(context.Background(), chatID, rootText)
 				if err != nil {
 					slog.Error(p.tag()+": create thread root for switch failed", "target", target, "chat_id", chatID, "error", err)
@@ -2860,6 +2860,22 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 		return false
 	}
 	return !p.noReplyToTrigger
+}
+
+func buildSwitchThreadTitle(target string, titleVal any) string {
+	title, _ := titleVal.(string)
+	title = strings.TrimSpace(title)
+	title = strings.TrimPrefix(title, "📌 ")
+	title = strings.ReplaceAll(title, "\n", " ")
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return fmt.Sprintf("💬 会话 #%s", target)
+	}
+	runes := []rune(title)
+	if len(runes) > 32 {
+		title = string(runes[:32]) + "…"
+	}
+	return fmt.Sprintf("💬 #%s｜%s", target, title)
 }
 
 func (p *Platform) createThreadRootMessage(ctx context.Context, chatID, content string) (string, error) {

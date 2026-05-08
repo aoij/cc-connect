@@ -10134,7 +10134,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			fmt.Sprintf("#%d", i+1),
 			btnType,
 			fmt.Sprintf("act:/switch %d", i+1),
-			map[string]string{"action_mode": "switch_session"},
+			map[string]string{"action_mode": "switch_session", "session_title": displayName},
 		)
 	}
 

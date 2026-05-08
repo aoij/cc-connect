@@ -4944,6 +4944,9 @@ func TestRenderListCard_SwitchButtonsCarryActionMode(t *testing.T) {
 	if item.Extra["action_mode"] != "switch_session" {
 		t.Fatalf("action_mode = %q, want switch_session", item.Extra["action_mode"])
 	}
+	if item.Extra["session_title"] != "Session one" {
+		t.Fatalf("session_title = %q, want Session one", item.Extra["session_title"])
+	}
 }
 
 func TestRenderDirCard_HistoryRowsUseSelectActions(t *testing.T) {

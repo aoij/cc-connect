@@ -477,8 +477,9 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 		Event: &callback.CardActionTriggerRequest{
 			Operator: &callback.Operator{OpenID: "ou_test_user"},
 			Action: &callback.CallBackAction{Value: map[string]any{
-				"action":      "act:/switch 1",
-				"action_mode": "switch_session",
+				"action":        "act:/switch 1",
+				"action_mode":   "switch_session",
+				"session_title": "chatgpt2api 分析当前部署",
 			}},
 			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
 		},
@@ -506,6 +507,27 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action to dispatch a switch message")
+	}
+}
+
+func TestBuildSwitchThreadTitleUsesSessionTitle(t *testing.T) {
+	got := buildSwitchThreadTitle("2", "📌 chatgpt2api 分析下当前项目部署的这个服务")
+	want := "💬 #2｜chatgpt2api 分析下当前项目部署的这个服务"
+	if got != want {
+		t.Fatalf("buildSwitchThreadTitle() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSwitchThreadTitleTruncatesLongTitle(t *testing.T) {
+	got := buildSwitchThreadTitle("3", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	if !strings.HasPrefix(got, "💬 #3｜") {
+		t.Fatalf("title prefix = %q, want switch thread prefix", got)
+	}
+	if len([]rune(strings.TrimPrefix(got, "💬 #3｜"))) != 33 {
+		t.Fatalf("truncated title length = %d, want 33 including ellipsis: %q", len([]rune(strings.TrimPrefix(got, "💬 #3｜"))), got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("title = %q, want ellipsis suffix", got)
 	}
 }
 
