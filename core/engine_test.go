@@ -3322,6 +3322,29 @@ func TestDeleteMode_CancelReturnsListCard(t *testing.T) {
 	}
 }
 
+func TestHandleCardNav_DeleteModeStartReturnsDeleteModeCard(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user1"
+	s := e.sessions.NewSession(sessionKey, "default")
+	s.SetAgentSessionID("session-1", "test")
+
+	card := e.handleCardNav("act:/delete-mode start", sessionKey)
+	if card == nil {
+		t.Fatal("expected delete mode card after start")
+	}
+	if got := countCardActionValues(card, "act:/delete-mode toggle "); got != 1 {
+		t.Fatalf("toggle action count = %d, want 1", got)
+	}
+	if _, ok := findCardAction(card, "act:/delete-mode noop session-1"); !ok {
+		t.Fatal("expected active session noop action in delete mode")
+	}
+}
+
 func TestDeleteMode_ConfirmWithoutSelectionShowsHint(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
@@ -5057,6 +5080,28 @@ func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
 	}
 	if item.Actions[2].Text != "删除" || item.Actions[2].Value != "act:/delete-one ask 1" || item.Actions[2].Type != "danger" {
 		t.Fatalf("third action = %#v, want delete-one ask", item.Actions[2])
+	}
+}
+
+func TestRenderListCard_IncludesBatchDeleteButton(t *testing.T) {
+	sessions := []AgentSessionInfo{
+		{ID: "session-1", Summary: "Session one", MessageCount: 1, ModifiedAt: time.Now()},
+	}
+	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	s := e.sessions.NewSession("test:user1", "default")
+	s.SetAgentSessionID("session-1", "test")
+
+	card, err := e.renderListCard("test:user1", 1)
+	if err != nil {
+		t.Fatalf("renderListCard returned error: %v", err)
+	}
+
+	btn, ok := findCardAction(card, "act:/delete-mode start")
+	if !ok {
+		t.Fatal("expected batch delete button on list card")
+	}
+	if btn.Type != "danger" {
+		t.Fatalf("batch delete button type = %q, want danger", btn.Type)
 	}
 }
 

@@ -9180,6 +9180,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		if strings.HasPrefix(args, "cancel") {
 			return e.renderListCardSafe(sessionKey, 1)
 		}
+		if strings.HasPrefix(args, "start") {
+			e.getOrCreateDeleteModeState(sessionKey, nil, nil)
+		}
 		return e.renderDeleteModeCard(sessionKey)
 	case "/stop":
 		return e.renderStatusCard(sessionKey, extractUserID(sessionKey))
@@ -10290,6 +10293,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if page > 1 {
 		navBtns = append(navBtns, e.cardPrevButton(fmt.Sprintf("nav:/list %d", page-1)))
 	}
+	navBtns = append(navBtns, DangerBtn(e.i18n.T(MsgDeleteModeBatchButton), "act:/delete-mode start"))
 	navBtns = append(navBtns, e.cardBackButton())
 	if page < totalPages {
 		navBtns = append(navBtns, e.cardNextButton(fmt.Sprintf("nav:/list %d", page+1)))
