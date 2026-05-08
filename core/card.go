@@ -55,22 +55,6 @@ type CardListItem struct {
 	Actions  []CardButton      // optional multi-button actions; when set, Btn* fields are ignored by rich renderers
 }
 
-// CardCommandInput renders a compact command form: description, optional
-// argument input, and a submit button. Platforms without native forms degrade
-// it to a text row with a button hint.
-type CardCommandInput struct {
-	Command      string            // slash command, e.g. "/switch"
-	Title        string            // human title/description; supports markdown in rich renderers
-	Description  string            // optional usage/help text shown below title
-	Placeholder  string            // input placeholder for command arguments
-	DefaultValue string            // optional pre-filled argument text
-	ButtonText   string            // submit button label
-	ButtonType   string            // "primary", "default", "danger"
-	Action       string            // callback action, usually "act:/help-command"
-	Extra        map[string]string // additional callback data carried with submit
-	Required     bool              // whether empty arguments should be rejected by the platform
-}
-
 // CardSelect renders a dropdown selector.
 // On Feishu this maps to select_static; on other platforms it degrades to text.
 type CardSelect struct {
@@ -85,13 +69,12 @@ type CardSelectOption struct {
 	Value string
 }
 
-func (CardMarkdown) cardElement()     {}
-func (CardDivider) cardElement()      {}
-func (CardActions) cardElement()      {}
-func (CardNote) cardElement()         {}
-func (CardListItem) cardElement()     {}
-func (CardCommandInput) cardElement() {}
-func (CardSelect) cardElement()       {}
+func (CardMarkdown) cardElement() {}
+func (CardDivider) cardElement()  {}
+func (CardActions) cardElement()  {}
+func (CardNote) cardElement()     {}
+func (CardListItem) cardElement() {}
+func (CardSelect) cardElement()   {}
 
 // CardButton represents a clickable button inside a CardActions element.
 type CardButton struct {
@@ -216,35 +199,6 @@ func (b *CardBuilder) ListItemActions(desc string, actions ...CardButton) *CardB
 	return b
 }
 
-// CommandInput appends a command form with an optional argument input and submit button.
-func (b *CardBuilder) CommandInput(command, title, description, placeholder, buttonText, buttonType, action string, extra map[string]string, required bool) *CardBuilder {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return b
-	}
-	if buttonText == "" {
-		buttonText = "执行"
-	}
-	if buttonType == "" {
-		buttonType = "default"
-	}
-	if action == "" {
-		action = "act:/help-command"
-	}
-	b.card.Elements = append(b.card.Elements, CardCommandInput{
-		Command:     command,
-		Title:       title,
-		Description: description,
-		Placeholder: placeholder,
-		ButtonText:  buttonText,
-		ButtonType:  buttonType,
-		Action:      action,
-		Extra:       extra,
-		Required:    required,
-	})
-	return b
-}
-
 // Select appends a dropdown selector element.
 func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, initValue string) *CardBuilder {
 	if len(options) > 0 {
@@ -319,27 +273,6 @@ func (c *Card) RenderText() string {
 				sb.WriteString("]")
 			}
 			sb.WriteString("\n")
-		case CardCommandInput:
-			title := strings.TrimSpace(e.Title)
-			if title == "" {
-				title = "**" + e.Command + "**"
-			}
-			sb.WriteString(title)
-			if e.Description != "" {
-				sb.WriteString("\n")
-				sb.WriteString(e.Description)
-			}
-			if e.Placeholder != "" {
-				sb.WriteString("\n参数：")
-				sb.WriteString(e.Placeholder)
-			}
-			sb.WriteString("  [")
-			if e.ButtonText != "" {
-				sb.WriteString(e.ButtonText)
-			} else {
-				sb.WriteString("执行")
-			}
-			sb.WriteString("]\n")
 		case CardSelect:
 			sb.WriteString(e.Placeholder)
 			sb.WriteString(": ")
@@ -363,7 +296,7 @@ func (c *Card) RenderText() string {
 func (c *Card) HasButtons() bool {
 	for _, elem := range c.Elements {
 		switch elem.(type) {
-		case CardActions, CardListItem, CardCommandInput, CardSelect:
+		case CardActions, CardListItem, CardSelect:
 			return true
 		}
 	}
@@ -397,16 +330,6 @@ func (c *Card) CollectButtons() [][]ButtonOption {
 			if len(row) > 0 {
 				rows = append(rows, row)
 			}
-		case CardCommandInput:
-			text := e.ButtonText
-			if text == "" {
-				text = "执行"
-			}
-			action := e.Action
-			if action == "" {
-				action = "act:/help-command"
-			}
-			rows = append(rows, []ButtonOption{{Text: text, Data: action}})
 		}
 	}
 	return rows

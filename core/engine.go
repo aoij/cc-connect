@@ -7130,14 +7130,9 @@ func (e *Engine) cmdStart(p Platform, msg *Message) {
 const defaultHelpGroup = "session"
 
 type helpCardItem struct {
-	command     string
-	action      string
-	extra       map[string]string
-	params      string
-	placeholder string
-	buttonText  string
-	buttonType  string
-	required    bool
+	command string
+	action  string
+	extra   map[string]string
 }
 
 type helpCardGroup struct {
@@ -7152,67 +7147,67 @@ func helpCardGroups() []helpCardGroup {
 			key:      "session",
 			titleKey: MsgHelpSessionSection,
 			items: []helpCardItem{
-				{command: "/new", action: "act:/help-command", params: "[name]", placeholder: "e.g. order import optimization", buttonText: "Create", buttonType: "primary", extra: map[string]string{
+				{command: "/new", action: "act:/new", extra: map[string]string{
 					"action_mode":  "thread_new_session",
-					"thread_title": "Codex - waiting task",
+					"thread_title": "Codex｜等待任务",
 				}},
-				{command: "/list", action: "nav:/list", buttonText: "List", buttonType: "primary"},
-				{command: "/current", action: "nav:/current", buttonText: "Current", extra: map[string]string{
+				{command: "/list", action: "nav:/list"},
+				{command: "/current", action: "nav:/current", extra: map[string]string{
 					"action_mode":  "thread_current_session",
-					"thread_title": "Codex - current session",
+					"thread_title": "Codex｜当前会话",
 				}},
-				{command: "/switch", action: "act:/help-command", params: "<index / id / name>", placeholder: "e.g. 2 or 019e... or order", buttonText: "Switch", buttonType: "primary", required: true},
-				{command: "/search", action: "act:/help-command", params: "<keyword>", placeholder: "e.g. import / bug / 019e", buttonText: "Search", required: true},
-				{command: "/history", action: "act:/help-command", params: "[count]", placeholder: "default 10, e.g. 20", buttonText: "History"},
-				{command: "/delete", action: "act:/help-command", params: "<index / range>", placeholder: "e.g. 1,2,3 or 3-7", buttonText: "Delete", buttonType: "danger", required: true},
-				{command: "/name", action: "act:/help-command", params: "[index] <name>", placeholder: "e.g. 2 order import fix", buttonText: "Rename", required: true},
+				{command: "/switch", action: "nav:/list"},
+				{command: "/search", action: "cmd:/search"},
+				{command: "/history", action: "nav:/history"},
+				{command: "/delete", action: "cmd:/delete"},
+				{command: "/name", action: "cmd:/name"},
 			},
 		},
 		{
 			key:      "agent",
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
-				{command: "/model", action: "nav:/model", buttonText: "Model", buttonType: "primary"},
-				{command: "/reasoning", action: "nav:/reasoning", buttonText: "Reasoning"},
-				{command: "/mode", action: "nav:/mode", buttonText: "Mode"},
-				{command: "/lang", action: "nav:/lang", buttonText: "Language"},
-				{command: "/provider", action: "nav:/provider", buttonText: "Provider"},
-				{command: "/memory", action: "act:/help-command", params: "[subcommand/text]", placeholder: "e.g. show or add project rule", buttonText: "Run"},
-				{command: "/allow", action: "act:/help-command", params: "<tool/permission>", placeholder: "e.g. Bash or Edit", buttonText: "Allow", required: true},
-				{command: "/quiet", action: "act:/help-command", params: "[on/off]", placeholder: "e.g. on", buttonText: "Toggle"},
-				{command: "/tts", action: "act:/help-command", params: "[on/off/text]", placeholder: "e.g. on", buttonText: "Run"},
+				{command: "/model", action: "nav:/model"},
+				{command: "/reasoning", action: "nav:/reasoning"},
+				{command: "/mode", action: "nav:/mode"},
+				{command: "/lang", action: "nav:/lang"},
+				{command: "/provider", action: "nav:/provider"},
+				{command: "/memory", action: "cmd:/memory"},
+				{command: "/allow", action: "cmd:/allow"},
+				{command: "/quiet", action: "cmd:/quiet"},
+				{command: "/tts", action: "cmd:/tts"},
 			},
 		},
 		{
 			key:      "tools",
 			titleKey: MsgHelpToolsSection,
 			items: []helpCardItem{
-				{command: "/shell", action: "act:/help-command", params: "<command>", placeholder: "e.g. go test ./...", buttonText: "Run Shell", buttonType: "primary", required: true},
-				{command: "/show", action: "act:/help-command", params: "<file/object>", placeholder: "e.g. README.md or diff", buttonText: "Show", required: true},
-				{command: "/cron", action: "nav:/cron", buttonText: "Cron"},
-				{command: "/heartbeat", action: "nav:/heartbeat", buttonText: "Heartbeat"},
-				{command: "/commands", action: "nav:/commands", buttonText: "Commands"},
-				{command: "/alias", action: "nav:/alias", buttonText: "Alias"},
-				{command: "/skills", action: "nav:/skills", buttonText: "Skills"},
-				{command: "/compress", action: "act:/help-command", params: "[note]", placeholder: "optional; compress current context", buttonText: "Compress"},
-				{command: "/stop", action: "act:/stop", buttonText: "Stop", buttonType: "danger"},
-				{command: "/ps", action: "act:/help-command", params: "[filter]", placeholder: "e.g. go or cc-connect", buttonText: "Processes"},
+				{command: "/shell", action: "cmd:/shell"},
+				{command: "/show", action: "cmd:/show"},
+				{command: "/cron", action: "nav:/cron"},
+				{command: "/heartbeat", action: "nav:/heartbeat"},
+				{command: "/commands", action: "nav:/commands"},
+				{command: "/alias", action: "nav:/alias"},
+				{command: "/skills", action: "nav:/skills"},
+				{command: "/compress", action: "cmd:/compress"},
+				{command: "/stop", action: "act:/stop"},
+				{command: "/ps", action: "cmd:/ps"},
 			},
 		},
 		{
 			key:      "system",
 			titleKey: MsgHelpSystemSection,
 			items: []helpCardItem{
-				{command: "/status", action: "nav:/status", buttonText: "Status", buttonType: "primary"},
-				{command: "/doctor", action: "nav:/doctor", buttonText: "Doctor"},
-				{command: "/usage", action: "act:/help-command", params: "[range]", placeholder: "e.g. today or month", buttonText: "Usage"},
-				{command: "/config", action: "nav:/config", buttonText: "Config"},
-				{command: "/bind", action: "act:/help-command", params: "<project/path>", placeholder: "e.g. C:/ai_work", buttonText: "Bind", required: true},
-				{command: "/workspace", action: "act:/help-command", params: "[subcommand]", placeholder: "e.g. list", buttonText: "Workspace"},
-				{command: "/dir", action: "nav:/dir", params: "[path]", placeholder: "e.g. C:/ai_work", buttonText: "Directory"},
-				{command: "/version", action: "nav:/version", buttonText: "Version"},
-				{command: "/upgrade", action: "nav:/upgrade", buttonText: "Upgrade"},
-				{command: "/restart", action: "act:/help-command", buttonText: "Restart", buttonType: "danger"},
+				{command: "/status", action: "nav:/status"},
+				{command: "/doctor", action: "nav:/doctor"},
+				{command: "/usage", action: "cmd:/usage"},
+				{command: "/config", action: "nav:/config"},
+				{command: "/bind", action: "cmd:/bind"},
+				{command: "/workspace", action: "cmd:/workspace"},
+				{command: "/dir", action: "nav:/dir"},
+				{command: "/version", action: "nav:/version"},
+				{command: "/upgrade", action: "nav:/upgrade"},
+				{command: "/restart", action: "cmd:/restart"},
 			},
 		},
 	}
@@ -7267,28 +7262,20 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 	cb := NewCard().Title(e.i18n.T(MsgHelpTitle), "blue")
 
 	if current.key == defaultHelpGroup {
-		commonTitle := "Common Actions / Quick Start"
-		commonDesc := "Open sessions, create a new topic, or inspect running tasks."
-		listLabel := "Session List"
-		newLabel := "New Session"
-		currentLabel := "Current"
-		tasksLabel := "Running Tasks"
-		newThreadTitle := "Codex - waiting task"
-		currentThreadTitle := "Codex - current session"
-		cb.Markdown("**" + commonTitle + "**\n" + commonDesc)
+		cb.Markdown("**Common Actions**\nStart with session list, new session, or current session.")
 		cb.ButtonsEqual(
-			PrimaryBtn(listLabel, "nav:/list"),
-			CardButton{Text: newLabel, Type: "default", Value: "act:/new", Extra: map[string]string{
+			PrimaryBtn("Session List", "nav:/list"),
+			CardButton{Text: "New Session", Type: "default", Value: "act:/new", Extra: map[string]string{
 				"action_mode":  "thread_new_session",
-				"thread_title": newThreadTitle,
+				"thread_title": "Codex｜等待任务",
 			}},
-			CardButton{Text: currentLabel, Type: "default", Value: "nav:/current", Extra: map[string]string{
+			CardButton{Text: "Current", Type: "default", Value: "nav:/current", Extra: map[string]string{
 				"action_mode":  "thread_current_session",
-				"thread_title": currentThreadTitle,
+				"thread_title": "Codex｜当前会话",
 			}},
 		)
 		cb.ButtonsEqual(
-			DefaultBtn(tasksLabel, "nav:/tasks"),
+			DefaultBtn("处理中任务", "nav:/tasks"),
 		)
 		cb.Divider()
 	}
@@ -7305,28 +7292,12 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 		cb.ButtonsEqual(row...)
 	}
 
-	cb.Markdown("**" + sectionTitle(current.titleKey) + "**")
+	cb.Markdown(sectionTitle(current.titleKey))
 	for _, item := range current.items {
-		buttonText := item.buttonText
-		if buttonText == "" {
-			buttonText = "Run"
-		}
-		buttonType := item.buttonType
-		if buttonType == "" {
-			buttonType = "default"
-		}
-		desc := ""
-		if item.params != "" {
-			desc = "Args: `" + item.params + "`"
-		}
-		if item.params != "" || item.required || strings.HasPrefix(item.action, "act:/help-command") {
-			cb.CommandInput(item.command, commandText(item.command), desc, item.placeholder, buttonText, buttonType, item.action, item.extra, item.required)
-			continue
-		}
 		if len(item.extra) > 0 {
-			cb.ListItemBtnExtra(commandText(item.command), buttonText, buttonType, item.action, item.extra)
+			cb.ListItemBtnExtra(commandText(item.command), "Open", "default", item.action, item.extra)
 		} else {
-			cb.ListItemBtn(commandText(item.command), buttonText, buttonType, item.action)
+			cb.ListItem(commandText(item.command), "Open", item.action)
 		}
 	}
 	cb.Note(e.i18n.T(MsgHelpTip))
