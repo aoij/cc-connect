@@ -5184,8 +5184,37 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	if !strings.Contains(text, "Common") {
 		t.Fatalf("default help text = %q, want common entry section", text)
 	}
+	if _, ok := findCardAction(card, "nav:/tasks"); !ok {
+		t.Fatal("expected help card to include active tasks entry")
+	}
+	if btn, ok := findCardAction(card, "act:/new"); !ok {
+		t.Fatal("expected new-session action")
+	} else if btn.Extra["action_mode"] != "thread_new_session" {
+		t.Fatalf("new-session action_mode = %q, want thread_new_session", btn.Extra["action_mode"])
+	}
+	if btn, ok := findCardAction(card, "nav:/current"); !ok {
+		t.Fatal("expected current-session action")
+	} else if btn.Extra["action_mode"] != "thread_current_session" {
+		t.Fatalf("current-session action_mode = %q, want thread_current_session", btn.Extra["action_mode"])
+	}
 	if strings.Contains(text, "**/model**") {
 		t.Fatalf("default help text = %q, should not include agent commands", text)
+	}
+}
+
+func TestHandleCardNav_ActiveTasksEmpty(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+
+	card := e.handleCardNav("nav:/tasks", "test:user1")
+	if card == nil {
+		t.Fatal("expected active tasks card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "当前没有正在执行中的任务") {
+		t.Fatalf("tasks card text = %q, want empty active tasks message", text)
+	}
+	if _, ok := findCardAction(card, "nav:/tasks"); !ok {
+		t.Fatal("expected refresh action on tasks card")
 	}
 }
 

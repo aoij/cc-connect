@@ -531,6 +531,64 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_CardActionNewSessionCreatesThread(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"thread_isolation":   true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	ip.createThreadRootHook = func(_ context.Context, chatID, content string) (string, error) {
+		if chatID != "oc_test_chat" {
+			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
+		}
+		if content != "Codex｜新会话" {
+			t.Fatalf("content = %q, want Codex｜新会话", content)
+		}
+		return "om_new_root", nil
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":       "act:/new",
+				"action_mode":  "thread_new_session",
+				"thread_title": "Codex｜新会话",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_new_root" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:om_new_root", msg.SessionKey)
+		}
+		if msg.Content != "/new" {
+			t.Fatalf("Content = %q, want /new", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card action to dispatch /new message")
+	}
+}
+
 func TestBuildSwitchThreadTitleUsesSessionTitle(t *testing.T) {
 	got := buildSwitchThreadTitle("2", "📌 chatgpt2api 分析下当前项目部署的这个服务")
 	want := "Codex #2｜chatgpt2api 分析下当前项目部署的这个服务"

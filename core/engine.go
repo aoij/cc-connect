@@ -4023,7 +4023,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			replyStart := time.Now()
 			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
-			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == state.sideText
+			sideText := strings.TrimSpace(state.sideText)
+			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == sideText
 			state.sideText = ""
 			state.mu.Unlock()
 
@@ -4100,6 +4101,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+			} else if normalizedBaseResponse != "" && sideText != "" && strings.HasPrefix(normalizedBaseResponse, sideText) {
+				sp.discard()
+				if metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse)); metaOnly != "" {
+					for _, chunk := range splitMessage(metaOnly, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
+					}
+				}
+				slog.Debug("EventResult: suppressed prefix duplicate final text", "response_len", len(fullResponse))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
 				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
@@ -7025,6 +7036,7 @@ const defaultHelpGroup = "session"
 type helpCardItem struct {
 	command string
 	action  string
+	extra   map[string]string
 }
 
 type helpCardGroup struct {
@@ -7039,9 +7051,15 @@ func helpCardGroups() []helpCardGroup {
 			key:      "session",
 			titleKey: MsgHelpSessionSection,
 			items: []helpCardItem{
-				{command: "/new", action: "act:/new"},
+				{command: "/new", action: "act:/new", extra: map[string]string{
+					"action_mode":  "thread_new_session",
+					"thread_title": "Codex｜新会话",
+				}},
 				{command: "/list", action: "nav:/list"},
-				{command: "/current", action: "nav:/current"},
+				{command: "/current", action: "nav:/current", extra: map[string]string{
+					"action_mode":  "thread_current_session",
+					"thread_title": "Codex｜当前会话",
+				}},
 				{command: "/switch", action: "nav:/list"},
 				{command: "/search", action: "cmd:/search"},
 				{command: "/history", action: "nav:/history"},
@@ -7151,8 +7169,17 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 		cb.Markdown("**Common Actions**\nStart with session list, new session, or current session.")
 		cb.ButtonsEqual(
 			PrimaryBtn("Session List", "nav:/list"),
-			DefaultBtn("New Session", "act:/new"),
-			DefaultBtn("Current", "nav:/current"),
+			CardButton{Text: "New Session", Type: "default", Value: "act:/new", Extra: map[string]string{
+				"action_mode":  "thread_new_session",
+				"thread_title": "Codex｜新会话",
+			}},
+			CardButton{Text: "Current", Type: "default", Value: "nav:/current", Extra: map[string]string{
+				"action_mode":  "thread_current_session",
+				"thread_title": "Codex｜当前会话",
+			}},
+		)
+		cb.ButtonsEqual(
+			DefaultBtn("处理中任务", "nav:/tasks"),
 		)
 		cb.Divider()
 	}
@@ -7171,9 +7198,174 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 
 	cb.Markdown(sectionTitle(current.titleKey))
 	for _, item := range current.items {
-		cb.ListItem(commandText(item.command), "Open", item.action)
+		if len(item.extra) > 0 {
+			cb.ListItemBtnExtra(commandText(item.command), "Open", "default", item.action, item.extra)
+		} else {
+			cb.ListItem(commandText(item.command), "Open", item.action)
+		}
 	}
 	cb.Note(e.i18n.T(MsgHelpTip))
+	return cb.Build()
+}
+
+type activeTaskItem struct {
+	sessionID    string
+	agentID      string
+	name         string
+	workspaceDir string
+	queueDepth   int
+	busy         bool
+	updatedAt    time.Time
+	active       bool
+}
+
+func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	sessionUserKey := sessions.CanonicalUserKey(sessionKey)
+	activeID := sessions.ActiveSessionID(sessionKey)
+
+	e.interactiveMu.Lock()
+	stateSnapshot := make(map[string]*interactiveState, len(e.interactiveStates))
+	for k, v := range e.interactiveStates {
+		stateSnapshot[k] = v
+	}
+	e.interactiveMu.Unlock()
+
+	sessionByAgentID := make(map[string]*Session)
+	for _, s := range sessions.ListSessions(sessionKey) {
+		if s == nil {
+			continue
+		}
+		if aid := strings.TrimSpace(s.GetAgentSessionID()); aid != "" {
+			sessionByAgentID[aid] = s
+		}
+	}
+
+	var items []activeTaskItem
+	seenSessionID := make(map[string]struct{})
+	for _, state := range stateSnapshot {
+		if state == nil {
+			continue
+		}
+
+		state.mu.Lock()
+		agentSession := state.agentSession
+		workspaceDir := state.workspaceDir
+		queueDepth := len(state.pendingMessages)
+		stopped := state.stopped
+		state.mu.Unlock()
+
+		if stopped || agentSession == nil || !agentSession.Alive() {
+			continue
+		}
+
+		agentID := strings.TrimSpace(agentSession.CurrentSessionID())
+
+		var sess *Session
+		if agentID != "" {
+			sess = sessionByAgentID[agentID]
+		}
+		if sess == nil {
+			continue
+		}
+
+		sessionID := sess.ID
+		if sessionID == "" {
+			continue
+		}
+		if _, exists := seenSessionID[sessionID]; exists {
+			continue
+		}
+		seenSessionID[sessionID] = struct{}{}
+
+		items = append(items, activeTaskItem{
+			sessionID:    sessionID,
+			agentID:      agentID,
+			name:         strings.TrimSpace(sess.GetName()),
+			workspaceDir: strings.TrimSpace(workspaceDir),
+			queueDepth:   queueDepth,
+			busy:         sess.Busy(),
+			updatedAt:    sess.GetUpdatedAt(),
+			active:       sessionID == activeID,
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].busy != items[j].busy {
+			return items[i].busy
+		}
+		if items[i].queueDepth != items[j].queueDepth {
+			return items[i].queueDepth > items[j].queueDepth
+		}
+		return items[i].updatedAt.After(items[j].updatedAt)
+	})
+
+	title := fmt.Sprintf("处理中任务 · %s", agent.Name())
+	cb := NewCard().Title(title, "orange")
+	if len(items) == 0 {
+		cb.Markdown("当前没有正在执行中的任务。")
+		cb.ButtonsEqual(
+			DefaultBtn("刷新", "nav:/tasks"),
+			e.cardBackButton(),
+		)
+		return cb.Build()
+	}
+
+	cb.Markdown(fmt.Sprintf("当前聊天 `%s` 下共找到 **%d** 个未完成/执行中的会话。", sessionUserKey, len(items)))
+	for idx, item := range items {
+		name := item.name
+		if name == "" {
+			name = "未命名会话"
+		}
+		statusParts := make([]string, 0, 3)
+		if item.active {
+			statusParts = append(statusParts, "当前会话")
+		}
+		if item.busy {
+			statusParts = append(statusParts, "执行中")
+		}
+		if item.queueDepth > 0 {
+			statusParts = append(statusParts, fmt.Sprintf("排队 %d", item.queueDepth))
+		}
+		if len(statusParts) == 0 {
+			statusParts = append(statusParts, "未关闭")
+		}
+		updated := ""
+		if !item.updatedAt.IsZero() {
+			updated = item.updatedAt.Format("01-02 15:04")
+		}
+		desc := fmt.Sprintf("**%d. %s**\n<font color='grey'>%s", idx+1, name, strings.Join(statusParts, " · "))
+		if updated != "" {
+			desc += " · 更新于 " + updated
+		}
+		if item.workspaceDir != "" {
+			desc += "\n" + dirCardTruncPath(item.workspaceDir)
+		}
+		desc += "</font>"
+
+		currentExtra := map[string]string{
+			"action_mode":  "thread_switch_current",
+			"thread_title": sessionThreadTitle(agent.Name(), idx+1, name),
+			"session_id":   item.agentID,
+			"session_name": name,
+		}
+		newExtra := map[string]string{
+			"action_mode":   "thread_switch_session",
+			"thread_title":  sessionThreadTitle(agent.Name(), idx+1, name),
+			"session_id":    item.agentID,
+			"session_name":  name,
+			"session_title": name,
+		}
+		cb.ListItemActions(
+			desc,
+			CardButton{Text: "进入处理", Type: "primary", Value: "nav:/current", Extra: currentExtra},
+			CardButton{Text: "新开线程", Type: "default", Value: "act:/switch", Extra: newExtra},
+		)
+	}
+	cb.ButtonsEqual(
+		DefaultBtn("刷新", "nav:/tasks"),
+		e.cardBackButton(),
+	)
 	return cb.Build()
 }
 
@@ -9132,6 +9324,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 			}
 		}
 		return e.renderListCardSafe(sessionKey, page)
+	case "/tasks":
+		return e.renderActiveTasksCard(sessionKey)
 	case "/dir":
 		page := 1
 		if args != "" {

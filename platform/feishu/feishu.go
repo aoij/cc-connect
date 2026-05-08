@@ -555,6 +555,59 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
 
+	if p.threadIsolation && chatID != "" {
+		actionMode, _ := event.Event.Action.Value["action_mode"].(string)
+		switch actionMode {
+		case "thread_new_session", "thread_current_session", "thread_switch_current", "thread_switch_session":
+			cmdToDispatch := actionVal
+			switch actionMode {
+			case "thread_new_session":
+				cmdToDispatch = "/new"
+			case "thread_current_session":
+				cmdToDispatch = "/current"
+			case "thread_switch_current":
+				if sid, _ := event.Event.Action.Value["session_id"].(string); strings.TrimSpace(sid) != "" {
+					cmdToDispatch = "/switch " + strings.TrimSpace(sid)
+				} else {
+					cmdToDispatch = "/current"
+				}
+			case "thread_switch_session":
+				if sid, _ := event.Event.Action.Value["session_id"].(string); strings.TrimSpace(sid) != "" {
+					cmdToDispatch = "/switch " + strings.TrimSpace(sid)
+				} else if strings.HasPrefix(actionVal, "act:/switch ") {
+					cmdToDispatch = "/" + strings.TrimPrefix(actionVal, "act:/")
+				}
+			}
+			rootText := buildActionThreadTitle(actionMode, cmdToDispatch, event.Event.Action.Value)
+			rootMsgID, err := p.createThreadRootMessage(context.Background(), chatID, rootText)
+			if err != nil {
+				slog.Error(p.tag()+": create thread root for card action failed", "action_mode", actionMode, "chat_id", chatID, "error", err)
+				return &callback.CardActionTriggerResponse{
+					Toast: &callback.Toast{Type: "error", Content: "创建新话题失败"},
+				}, nil
+			}
+			p.markBotThreadRoot(rootMsgID)
+			newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+			newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
+			go func() {
+				p.handler(p.dispatchPlatform(), &core.Message{
+					SessionKey: newSessionKey,
+					Platform:   p.platformName,
+					ChannelKey: chatID,
+					UserID:     userID,
+					UserName:   p.resolveUserName(userID),
+					ChatName:   p.resolveChatName(chatID),
+					Content:    cmdToDispatch,
+					ReplyCtx:   newReplyCtx,
+				})
+				p.registerThreadAliasFromRootAsync(chatID, rootMsgID, newSessionKey)
+			}()
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{Type: "success", Content: "已在新话题中打开"},
+			}, nil
+		}
+	}
+
 	if strings.HasPrefix(actionVal, "act:/switch ") && p.sessionSwitchNewThread && p.threadIsolation && chatID != "" {
 		actionMode, _ := event.Event.Action.Value["action_mode"].(string)
 		if actionMode == "switch_session" {
@@ -3321,6 +3374,36 @@ func buildSwitchThreadTitle(target string, actionValue any) string {
 		return fmt.Sprintf("Codex｜会话 #%s", target)
 	}
 	return fmt.Sprintf("Codex #%s｜%s", target, truncateThreadTitle(title, 36))
+}
+
+func buildActionThreadTitle(actionMode, command string, actionValue any) string {
+	if value, ok := actionValue.(map[string]any); ok {
+		if explicit, _ := value["thread_title"].(string); strings.TrimSpace(explicit) != "" {
+			return truncateThreadTitle(sanitizeThreadTitle(explicit), 48)
+		}
+	}
+
+	switch actionMode {
+	case "thread_new_session":
+		return "Codex｜新会话"
+	case "thread_current_session":
+		return "Codex｜当前会话"
+	case "thread_switch_current", "thread_switch_session":
+		if value, ok := actionValue.(map[string]any); ok {
+			if sessionName, _ := value["session_name"].(string); strings.TrimSpace(sessionName) != "" {
+				return truncateThreadTitle("Codex｜"+sanitizeThreadTitle(sessionName), 48)
+			}
+			if sessionTitle, _ := value["session_title"].(string); strings.TrimSpace(sessionTitle) != "" {
+				return truncateThreadTitle("Codex｜"+sanitizeThreadTitle(sessionTitle), 48)
+			}
+		}
+		return "Codex｜会话处理"
+	default:
+		if title, ok := buildCommandThreadTitle(command); ok {
+			return title
+		}
+	}
+	return "Codex｜会话"
 }
 
 func sanitizeThreadTitle(title string) string {
