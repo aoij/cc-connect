@@ -10129,11 +10129,12 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		if s.ID == activeAgentID {
 			btnType = "primary"
 		}
-		cb.ListItemBtn(
+		cb.ListItemBtnExtra(
 			e.i18n.Tf(MsgListItem, marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
 			fmt.Sprintf("#%d", i+1),
 			btnType,
 			fmt.Sprintf("act:/switch %d", i+1),
+			map[string]string{"action_mode": "switch_session"},
 		)
 	}
 

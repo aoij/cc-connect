@@ -228,6 +228,45 @@ func TestRenderCardMap_DeleteModeUsesCheckerForm(t *testing.T) {
 	}
 }
 
+func TestRenderCardMap_ListItemExtraPropsArePreserved(t *testing.T) {
+	card := core.NewCard().
+		ListItemBtnExtra("Session one", "#1", "primary", "act:/switch 1", map[string]string{"action_mode": "switch_session"}).
+		Build()
+
+	got := decodeRenderedCard(t, card)
+	elements, ok := got["elements"].([]any)
+	if !ok || len(elements) != 1 {
+		t.Fatalf("elements = %#v, want one element", got["elements"])
+	}
+	row, ok := elements[0].(map[string]any)
+	if !ok {
+		t.Fatalf("row = %#v, want object", elements[0])
+	}
+	columns, ok := row["columns"].([]any)
+	if !ok || len(columns) != 2 {
+		t.Fatalf("columns = %#v, want 2 columns", row["columns"])
+	}
+	actionCol, ok := columns[1].(map[string]any)
+	if !ok {
+		t.Fatalf("action column = %#v, want object", columns[1])
+	}
+	inner, ok := actionCol["elements"].([]any)
+	if !ok || len(inner) != 1 {
+		t.Fatalf("inner elements = %#v, want one button", actionCol["elements"])
+	}
+	btn, ok := inner[0].(map[string]any)
+	if !ok {
+		t.Fatalf("button = %#v, want object", inner[0])
+	}
+	value, ok := btn["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("value = %#v, want object", btn["value"])
+	}
+	if value["action_mode"] != "switch_session" {
+		t.Fatalf("action_mode = %#v, want switch_session", value["action_mode"])
+	}
+}
+
 func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 	card := core.NewCard().
 		Buttons(core.PrimaryBtn("Open", "nav:/help session")).

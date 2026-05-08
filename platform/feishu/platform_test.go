@@ -443,6 +443,72 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":                    "cli_xxx",
+		"app_secret":                "secret",
+		"enable_feishu_card":        true,
+		"thread_isolation":          true,
+		"session_switch_new_thread": true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	created := make(chan struct{}, 1)
+	ip.createThreadRootHook = func(_ context.Context, chatID, content string) (string, error) {
+		if chatID != "oc_test_chat" {
+			t.Fatalf("chatID = %q, want oc_test_chat", chatID)
+		}
+		if !strings.Contains(content, "1") {
+			t.Fatalf("content = %q, want switch target", content)
+		}
+		created <- struct{}{}
+		return "om_new_root", nil
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":      "act:/switch 1",
+				"action_mode": "switch_session",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	select {
+	case <-created:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected createThreadRootHook to be called")
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_new_root" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:om_new_root", msg.SessionKey)
+		}
+		if msg.Content != "/switch 1" {
+			t.Fatalf("Content = %q, want /switch 1", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card action to dispatch a switch message")
+	}
+}
+
 func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {

@@ -118,6 +118,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	sessionSwitchNewThread     bool
 	self                       core.Platform
 	reactionEmoji              string
 	doneEmoji                  string
@@ -156,8 +157,9 @@ type Platform struct {
 	isWSPrimary  bool           // true if this platform owns the shared WebSocket connection
 	// cardActionMessageIDs tracks the most recent card-action messageID per
 	// session key, enabling async card refreshes via the Patch API.
-	cardActionMsgMu  sync.Mutex
-	cardActionMsgIDs map[string]string // sessionKey → messageID
+	cardActionMsgMu      sync.Mutex
+	cardActionMsgIDs     map[string]string // sessionKey → messageID
+	createThreadRootHook func(ctx context.Context, chatID, content string) (string, error)
 }
 
 type interactivePlatform struct {
@@ -238,6 +240,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	sessionSwitchNewThread, _ := opts["session_switch_new_thread"].(bool)
 
 	// Webhook mode configuration (for Lark international version)
 	port, _ := opts["port"].(string)
@@ -262,6 +265,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		sessionSwitchNewThread:     sessionSwitchNewThread,
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
@@ -539,6 +543,37 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+
+	if strings.HasPrefix(actionVal, "act:/switch ") && p.sessionSwitchNewThread && p.threadIsolation && chatID != "" {
+		actionMode, _ := event.Event.Action.Value["action_mode"].(string)
+		if actionMode == "switch_session" {
+			target := strings.TrimSpace(strings.TrimPrefix(actionVal, "act:/switch "))
+			if target != "" {
+				rootText := fmt.Sprintf("切换会话 #%s", target)
+				rootMsgID, err := p.createThreadRootMessage(context.Background(), chatID, rootText)
+				if err != nil {
+					slog.Error(p.tag()+": create thread root for switch failed", "target", target, "chat_id", chatID, "error", err)
+					return &callback.CardActionTriggerResponse{
+						Toast: &callback.Toast{Type: "error", Content: "创建新话题失败"},
+					}, nil
+				}
+				newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+				newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
+				go p.handler(p.dispatchPlatform(), &core.Message{
+					SessionKey: newSessionKey,
+					Platform:   p.platformName,
+					UserID:     userID,
+					UserName:   p.resolveUserName(userID),
+					ChatName:   p.resolveChatName(chatID),
+					Content:    "/switch " + target,
+					ReplyCtx:   newReplyCtx,
+				})
+				return &callback.CardActionTriggerResponse{
+					Toast: &callback.Toast{Type: "success", Content: "已创建新话题并切换会话"},
+				}, nil
+			}
+		}
+	}
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
@@ -2776,6 +2811,44 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 		return false
 	}
 	return !p.noReplyToTrigger
+}
+
+func (p *Platform) createThreadRootMessage(ctx context.Context, chatID, content string) (string, error) {
+	if p.createThreadRootHook != nil {
+		return p.createThreadRootHook(ctx, chatID, content)
+	}
+	msgType, msgBody := buildReplyContent(content)
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(msgType).
+			Content(msgBody).
+			Build()).
+		Build()
+	var msgID string
+	err := p.withTransientRetry(ctx, "create thread root", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "create thread root", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Create(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: create thread root api call: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: create thread root failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				msgID = *resp.Data.MessageId
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	if msgID == "" {
+		return "", fmt.Errorf("%s: create thread root returned empty message id", p.tag())
+	}
+	return msgID, nil
 }
 
 func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {

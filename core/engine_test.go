@@ -4922,6 +4922,30 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	}
 }
 
+func TestRenderListCard_SwitchButtonsCarryActionMode(t *testing.T) {
+	sessions := []AgentSessionInfo{
+		{ID: "session-1", Summary: "Session one", MessageCount: 1, ModifiedAt: time.Now()},
+	}
+	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	s := e.sessions.NewSession("test:user1", "default")
+	s.SetAgentSessionID("session-1", "test")
+
+	card, err := e.renderListCard("test:user1", 1)
+	if err != nil {
+		t.Fatalf("renderListCard returned error: %v", err)
+	}
+	if len(card.Elements) == 0 {
+		t.Fatal("expected card elements")
+	}
+	item, ok := card.Elements[0].(CardListItem)
+	if !ok {
+		t.Fatalf("first element = %T, want CardListItem", card.Elements[0])
+	}
+	if item.Extra["action_mode"] != "switch_session" {
+		t.Fatalf("action_mode = %q, want switch_session", item.Extra["action_mode"])
+	}
+}
+
 func TestRenderDirCard_HistoryRowsUseSelectActions(t *testing.T) {
 	tempDir := t.TempDir()
 	dir1 := filepath.Join(tempDir, "dir1")
