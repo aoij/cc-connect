@@ -121,6 +121,29 @@ func TestSessionManager_ListSessions(t *testing.T) {
 	}
 }
 
+func TestSessionManager_RegisterSessionAliasSharesActiveSession(t *testing.T) {
+	sm := NewSessionManager("")
+	canonical := "feishu:oc_chat:root:om_root"
+	alias := "feishu:oc_chat:root:omt_topic"
+
+	s1 := sm.NewSession(canonical, "topic-session")
+	s1.SetAgentSessionID("codex-thread-1", "codex")
+	sm.RegisterSessionAlias(alias, canonical)
+
+	if got := sm.GetOrCreateActive(alias); got.ID != s1.ID {
+		t.Fatalf("alias active session ID = %q, want %q", got.ID, s1.ID)
+	}
+	if got := sm.ActiveSessionID(alias); got != s1.ID {
+		t.Fatalf("alias ActiveSessionID = %q, want %q", got, s1.ID)
+	}
+	if got := sm.ListSessions(alias); len(got) != 1 || got[0].ID != s1.ID {
+		t.Fatalf("alias ListSessions = %#v, want only %q", got, s1.ID)
+	}
+	if _, err := sm.SwitchSession(alias, s1.ID); err != nil {
+		t.Fatalf("SwitchSession through alias failed: %v", err)
+	}
+}
+
 func TestSessionManager_SessionNames(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.SetSessionName("agent-123", "my-chat")

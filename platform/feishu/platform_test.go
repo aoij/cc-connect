@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -467,11 +469,21 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 		created <- struct{}{}
 		return "om_new_root", nil
 	}
+	ip.lookupThreadIDHook = func(rootID string) string {
+		if rootID != "om_new_root" {
+			t.Fatalf("rootID = %q, want om_new_root", rootID)
+		}
+		return "omt_new_topic"
+	}
 
 	msgCh := make(chan *core.Message, 1)
 	ip.handler = func(_ core.Platform, msg *core.Message) {
 		msgCh <- msg
 	}
+	aliasCh := make(chan [2]string, 1)
+	ip.SetCardSessionAliasRegistrar(func(aliasSessionKey, targetSessionKey string) {
+		aliasCh <- [2]string{aliasSessionKey, targetSessionKey}
+	})
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
@@ -507,6 +519,15 @@ func TestInteractivePlatform_CardActionSwitchCanCreateNewThread(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action to dispatch a switch message")
+	}
+
+	select {
+	case alias := <-aliasCh:
+		if alias[0] != "feishu:oc_test_chat:root:omt_new_topic" || alias[1] != "feishu:oc_test_chat:root:om_new_root" {
+			t.Fatalf("alias registration = %#v, want topic alias to root session", alias)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected topic alias registration")
 	}
 }
 
@@ -595,6 +616,74 @@ func TestInteractivePlatform_BotCreatedThreadAllowsNoMentionReplies(t *testing.T
 	}
 }
 
+func TestInteractivePlatform_BotCreatedTopicAllowsNoMentionRepliesByThreadID(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":           "cli_xxx",
+		"app_secret":       "secret",
+		"thread_isolation": true,
+		"group_reply_all":  false,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+	ip.markBotThreadID("omt_topic")
+
+	msgID := "om_reply"
+	rootID := "om_card_message"
+	threadID := "omt_topic"
+	parentID := "om_topic_root"
+	chatID := "oc_test_chat"
+	userID := "ou_test_user"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"continue in topic without mention"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &userID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				RootId:      &rootID,
+				ParentId:    &parentID,
+				ThreadId:    &threadID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:omt_topic" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_test_chat:root:omt_topic", msg.SessionKey)
+		}
+		if msg.Content != "continue in topic without mention" {
+			t.Fatalf("Content = %q, want no-mention topic text", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected no-mention reply in bot-created topic to dispatch")
+	}
+}
+
 func TestInteractivePlatform_GroupMessageWithoutMentionOutsideBotThreadIgnored(t *testing.T) {
 	platformAny, err := New(map[string]any{
 		"app_id":           "cli_xxx",
@@ -647,6 +736,93 @@ func TestInteractivePlatform_GroupMessageWithoutMentionOutsideBotThreadIgnored(t
 	case msg := <-msgCh:
 		t.Fatalf("unexpected dispatch for regular no-mention group message: %#v", msg)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestInteractivePlatform_MentionToOtherUserInsideBotThreadIgnored(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":           "cli_xxx",
+		"app_secret":       "secret",
+		"thread_isolation": true,
+		"group_reply_all":  false,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.botOpenID = "ou_bot"
+	ip.markBotThreadID("omt_topic")
+
+	msgID := "om_reply_other_mention"
+	rootID := "om_card_message"
+	threadID := "omt_topic"
+	parentID := "om_topic_root"
+	chatID := "oc_test_chat"
+	userID := "ou_test_user"
+	otherID := "ou_other"
+	msgType := "text"
+	chatType := "group"
+	senderType := "user"
+	content := `{"text":"@someone please check"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &userID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &msgID,
+				RootId:      &rootID,
+				ParentId:    &parentID,
+				ThreadId:    &threadID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+				Mentions: []*larkim.MentionEvent{
+					{
+						Key:  stringPtr("@someone"),
+						Name: stringPtr("someone"),
+						Id:   &larkim.UserId{OpenId: &otherID},
+					},
+				},
+			},
+		},
+	}
+
+	if err := ip.onMessage(context.Background(), event); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		t.Fatalf("unexpected dispatch for other-user mention inside bot thread: %#v", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestFetchSingleMessageKeepsRawAppSenderID(t *testing.T) {
+	p := &Platform{platformName: "feishu", appID: "cli_bot", client: lark.NewClient("cli_bot", "secret")}
+	body := `{"code":0,"data":{"items":[{"msg_type":"text","parent_id":"","sender":{"id":"cli_bot","sender_type":"app"},"body":{"content":"{\"text\":\"topic root\"}"}}]}}`
+	p.client = lark.NewClient("cli_bot", "secret", lark.WithOpenBaseUrl(newFeishuJSONServer(t, body)))
+
+	msg := p.fetchSingleMessage(context.Background(), "om_root")
+	if msg == nil {
+		t.Fatal("fetchSingleMessage returned nil")
+	}
+	if msg.senderID != "cli_bot" {
+		t.Fatalf("senderID = %q, want cli_bot", msg.senderID)
+	}
+	if msg.senderType != "app" {
+		t.Fatalf("senderType = %q, want app", msg.senderType)
 	}
 }
 
@@ -1052,6 +1228,16 @@ func TestResolveUserNameSkipsInvalidLookupID(t *testing.T) {
 }
 
 func stringPtr(s string) *string { return &s }
+
+func newFeishuJSONServer(t *testing.T, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
 
 func TestSanitizeMarkdownURLs(t *testing.T) {
 	tests := []struct {

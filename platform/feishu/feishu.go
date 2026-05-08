@@ -130,23 +130,25 @@ type Platform struct {
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
-	noReplyToTrigger bool
-	resolveMentions  bool
-	client           *lark.Client
-	replayClient     *lark.Client
-	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
-	handler          core.MessageHandler
-	cardNavHandler   core.CardNavigationHandler
-	cancel           context.CancelFunc
-	dedup            *core.MessageDedup
-	botOpenID        string
-	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
-	userNameCache    sync.Map          // open_id -> display name
-	chatNameCache    sync.Map          // chat_id -> chat name
-	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
-	recalledMu       sync.Mutex
-	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+	noReplyToTrigger   bool
+	resolveMentions    bool
+	client             *lark.Client
+	replayClient       *lark.Client
+	replayClientMu     sync.Mutex
+	wsClient           *larkws.Client
+	handler            core.MessageHandler
+	cardNavHandler     core.CardNavigationHandler
+	sessionAliasHook   func(aliasSessionKey, targetSessionKey string)
+	lookupThreadIDHook func(rootID string) string
+	cancel             context.CancelFunc
+	dedup              *core.MessageDedup
+	botOpenID          string
+	peerBots           map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	userNameCache      sync.Map          // open_id -> display name
+	chatNameCache      sync.Map          // chat_id -> chat name
+	chatMemberCache    sync.Map          // chatID -> *chatMemberEntry
+	recalledMu         sync.Mutex
+	recalledMsgIDs     map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -162,6 +164,7 @@ type Platform struct {
 	createThreadRootHook func(ctx context.Context, chatID, content string) (string, error)
 	botThreadRootMu      sync.Mutex
 	botThreadRootIDs     map[string]time.Time // root messageID -> created time, allows no-mention replies in bot-created topics
+	botThreadIDs         map[string]time.Time // topic threadID -> created time, covers Feishu topic replies whose root_id is the card/root message
 }
 
 type interactivePlatform struct {
@@ -172,6 +175,10 @@ type feishuRequestFunc func(client *lark.Client, options ...larkcore.RequestOpti
 
 func (p *Platform) SetCardNavigationHandler(h core.CardNavigationHandler) {
 	p.cardNavHandler = h
+}
+
+func (p *Platform) SetCardSessionAliasRegistrar(h func(aliasSessionKey, targetSessionKey string)) {
+	p.sessionAliasHook = h
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -562,15 +569,19 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				p.markBotThreadRoot(rootMsgID)
 				newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
 				newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
-				go p.handler(p.dispatchPlatform(), &core.Message{
-					SessionKey: newSessionKey,
-					Platform:   p.platformName,
-					UserID:     userID,
-					UserName:   p.resolveUserName(userID),
-					ChatName:   p.resolveChatName(chatID),
-					Content:    "/switch " + target,
-					ReplyCtx:   newReplyCtx,
-				})
+				go func() {
+					p.handler(p.dispatchPlatform(), &core.Message{
+						SessionKey: newSessionKey,
+						Platform:   p.platformName,
+						ChannelKey: chatID,
+						UserID:     userID,
+						UserName:   p.resolveUserName(userID),
+						ChatName:   p.resolveChatName(chatID),
+						Content:    "/switch " + target,
+						ReplyCtx:   newReplyCtx,
+					})
+					p.registerThreadAliasFromRootAsync(chatID, rootMsgID, newSessionKey)
+				}()
 				return &callback.CardActionTriggerResponse{
 					Toast: &callback.Toast{Type: "success", Content: "已创建新话题并切换会话"},
 				}, nil
@@ -587,6 +598,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			}
 			p.cardActionMsgIDs[sessionKey] = messageID
 			p.cardActionMsgMu.Unlock()
+			p.registerThreadAliasFromRootAsync(chatID, messageID, sessionKey)
 		}
 		// Feishu uses native form checker for delete-mode toggle,
 		// so return a toast without calling cardNavHandler to avoid a full card refresh.
@@ -635,6 +647,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
+			ChannelKey: chatID,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
 			ChatName:   p.resolveChatName(chatID),
@@ -666,6 +679,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
+			ChannelKey: chatID,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
 			ChatName:   p.resolveChatName(chatID),
@@ -701,6 +715,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		go p.handler(p.dispatchPlatform(), &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
+			ChannelKey: chatID,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
 			ChatName:   p.resolveChatName(chatID),
@@ -943,10 +958,11 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 		return nil
 	}
 	p.handler(p.dispatchPlatform(), &core.Message{
-		Platform:  p.platformName,
-		MessageID: messageID,
-		Recalled:  true,
-		ReplyCtx:  replyContext{messageID: messageID, chatID: chatID},
+		Platform:   p.platformName,
+		MessageID:  messageID,
+		ChannelKey: chatID,
+		Recalled:   true,
+		ReplyCtx:   replyContext{messageID: messageID, chatID: chatID},
 	})
 	return nil
 }
@@ -1010,7 +1026,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"thread_isolation", p.threadIsolation,
 	)
 
-	allowNoMentionInBotThread := p.isBotThreadMessage(msg)
+	allowNoMentionInBotThread := false
+	if !hasAnyMention(msg.Mentions) {
+		allowNoMentionInBotThread = p.isBotThreadMessage(msg)
+	}
 	if chatType == "group" && !p.groupReplyAll && p.botOpenID != "" && !allowNoMentionInBotThread {
 		if !isBotMentioned(msg.Mentions, p.botOpenID) {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
@@ -1087,29 +1106,161 @@ func (p *Platform) markBotThreadRoot(rootID string) {
 	p.botThreadRootIDs[rootID] = now
 }
 
+func (p *Platform) markBotThreadID(threadID string) {
+	if threadID == "" {
+		return
+	}
+	p.botThreadRootMu.Lock()
+	defer p.botThreadRootMu.Unlock()
+	if p.botThreadIDs == nil {
+		p.botThreadIDs = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for id, createdAt := range p.botThreadIDs {
+		if now.Sub(createdAt) > botThreadRootTTL {
+			delete(p.botThreadIDs, id)
+		}
+	}
+	p.botThreadIDs[threadID] = now
+}
+
+func (p *Platform) registerThreadAliasFromRootAsync(chatID, rootID, sessionKey string) {
+	if chatID == "" || rootID == "" || sessionKey == "" {
+		return
+	}
+	go func() {
+		if threadID, ok := p.waitForThreadIDForRoot(rootID, 20*time.Second); ok {
+			p.markBotThreadID(threadID)
+			if p.sessionAliasHook != nil {
+				p.sessionAliasHook(fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, threadID), sessionKey)
+			}
+		}
+	}()
+}
+
+func (p *Platform) waitForThreadIDForRoot(rootID string, timeout time.Duration) (string, bool) {
+	if rootID == "" || timeout <= 0 {
+		return "", false
+	}
+	deadline := time.Now().Add(timeout)
+	delay := 300 * time.Millisecond
+	for {
+		if threadID := p.lookupThreadIDForRoot(context.Background(), rootID); threadID != "" {
+			return threadID, true
+		}
+		if time.Now().Add(delay).After(deadline) {
+			return "", false
+		}
+		time.Sleep(delay)
+		if delay < 2*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+func (p *Platform) lookupThreadIDForRoot(ctx context.Context, rootID string) string {
+	if rootID == "" {
+		return ""
+	}
+	if p.lookupThreadIDHook != nil {
+		return p.lookupThreadIDHook(rootID)
+	}
+	if p.client == nil {
+		return ""
+	}
+	var threadID string
+	err := p.withTransientRetry(ctx, "lookup thread id", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "lookup thread id", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			req := larkim.NewGetMessageReqBuilder().
+				MessageId(rootID).
+				Build()
+			resp, err := client.Im.Message.Get(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: get message api call: %w", p.tag(), err)
+			}
+			if resp == nil || !resp.Success() {
+				code, msg := 0, ""
+				if resp != nil {
+					code, msg = resp.Code, resp.Msg
+				}
+				return fmt.Errorf("%s: get message failed code=%d msg=%s", p.tag(), code, msg)
+			}
+			if resp.Data != nil && len(resp.Data.Items) > 0 {
+				threadID = stringValue(resp.Data.Items[0].ThreadId)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		slog.Debug(p.tag()+": lookup thread id failed", "root_id", rootID, "error", err)
+	}
+	return threadID
+}
+
+func (p *Platform) learnBotThreadFromFetchedMessage(rootID string) bool {
+	if rootID == "" {
+		return false
+	}
+	msg := p.fetchSingleMessage(context.Background(), rootID)
+	if msg == nil || msg.senderType != "app" || msg.senderID != p.appID {
+		return false
+	}
+	p.markBotThreadRoot(rootID)
+	return true
+}
+
 func (p *Platform) isBotThreadMessage(msg *larkim.EventMessage) bool {
 	if msg == nil || !p.threadIsolation {
 		return false
 	}
 	rootID := stringValue(msg.RootId)
-	if rootID == "" || rootID == stringValue(msg.MessageId) {
+	threadID := stringValue(msg.ThreadId)
+	if rootID == "" && threadID == "" {
+		return false
+	}
+	messageID := stringValue(msg.MessageId)
+	parentID := stringValue(msg.ParentId)
+	if (rootID == "" || rootID == messageID) && (threadID == "" || threadID == messageID) && parentID == "" {
 		return false
 	}
 
 	p.botThreadRootMu.Lock()
-	defer p.botThreadRootMu.Unlock()
-	if p.botThreadRootIDs == nil {
-		return false
+	now := time.Now()
+	if p.botThreadRootIDs != nil && rootID != "" {
+		if createdAt, ok := p.botThreadRootIDs[rootID]; ok {
+			if now.Sub(createdAt) <= botThreadRootTTL {
+				p.botThreadRootMu.Unlock()
+				return true
+			}
+			delete(p.botThreadRootIDs, rootID)
+		}
 	}
-	createdAt, ok := p.botThreadRootIDs[rootID]
-	if !ok {
-		return false
+	if p.botThreadIDs != nil && threadID != "" {
+		if createdAt, ok := p.botThreadIDs[threadID]; ok {
+			if now.Sub(createdAt) <= botThreadRootTTL {
+				p.botThreadRootMu.Unlock()
+				return true
+			}
+			delete(p.botThreadIDs, threadID)
+		}
 	}
-	if time.Since(createdAt) > botThreadRootTTL {
-		delete(p.botThreadRootIDs, rootID)
-		return false
+	if p.botThreadRootIDs != nil && parentID != "" {
+		if createdAt, ok := p.botThreadRootIDs[parentID]; ok {
+			if now.Sub(createdAt) <= botThreadRootTTL {
+				p.botThreadRootMu.Unlock()
+				return true
+			}
+			delete(p.botThreadRootIDs, parentID)
+		}
 	}
-	return true
+	p.botThreadRootMu.Unlock()
+	if rootID != "" && p.learnBotThreadFromFetchedMessage(rootID) {
+		return true
+	}
+	if parentID != "" && p.learnBotThreadFromFetchedMessage(parentID) {
+		return true
+	}
+	return false
 }
 
 // dispatchMessage handles the message content parsing, media download, and
@@ -1158,8 +1309,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quotedPrefix, ReplyCtx: rctx,
 		})
 
@@ -1181,8 +1332,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -1207,8 +1358,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -1226,8 +1377,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quotedPrefix, Images: images,
 			ReplyCtx: rctx,
 		})
@@ -1254,8 +1405,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		mimeType := detectMimeType(fileData)
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Files: []core.FileAttachment{{
 				MimeType: mimeType,
 				Data:     fileData,
@@ -1272,8 +1423,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content:  text,
 			Images:   images,
 			Files:    files,
@@ -1303,8 +1454,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Images:   []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx: rctx,
 		})
@@ -1339,8 +1490,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
+			MessageID: messageID, ChannelKey: chatID,
+			UserID: userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quotedPrefix, Images: images, ReplyCtx: rctx,
 		})
 
@@ -1559,6 +1710,7 @@ func (p *Platform) resolveMentionsInContent(ctx context.Context, chatID, content
 // chainMessage holds extracted data from one message in a reply chain.
 type chainMessage struct {
 	senderName string
+	senderID   string
 	senderType string // "user" or "app"
 	text       string
 	parentID   string
@@ -1673,6 +1825,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 
 	return &chainMessage{
 		senderName: senderName,
+		senderID:   item.Sender.ID,
 		senderType: item.Sender.SenderType,
 		text:       text,
 		parentID:   item.ParentID,
@@ -2795,6 +2948,23 @@ func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
 	return false
 }
 
+func hasAnyMention(mentions []*larkim.MentionEvent) bool {
+	for _, m := range mentions {
+		if m == nil {
+			continue
+		}
+		if m.Id != nil {
+			if stringValue(m.Id.OpenId) != "" || stringValue(m.Id.UserId) != "" || stringValue(m.Id.UnionId) != "" {
+				return true
+			}
+		}
+		if stringValue(m.Key) != "" || stringValue(m.Name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // stripMentions processes @mention placeholders (e.g. @_user_1) in text.
 // The bot's own mention is removed; other user mentions are replaced with
 // their display name so the agent can see who was referenced.
@@ -2822,6 +2992,12 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
 		rootID := stringValue(msg.RootId)
+		if threadID := stringValue(msg.ThreadId); threadID != "" && rootID != "" && rootID != threadID && stringValue(msg.ParentId) != "" {
+			rootID = threadID
+		}
+		if rootID == "" {
+			rootID = stringValue(msg.ThreadId)
+		}
 		if rootID == "" {
 			rootID = stringValue(msg.MessageId)
 		}

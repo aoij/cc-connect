@@ -242,14 +242,17 @@ func renderCardListItemElements(e core.CardListItem, sessionKey string) []map[st
 		for k, v := range btn.Extra {
 			valMap[k] = v
 		}
-		buttonElements = append(buttonElements, map[string]any{
+		button := map[string]any{
 			"tag":   "button",
 			"text":  plainText(btn.Text),
 			"type":  btnType,
 			"size":  "small",
-			"width": "fill",
 			"value": valMap,
-		})
+		}
+		if len(actionButtons) > 1 {
+			button["width"] = "fill"
+		}
+		buttonElements = append(buttonElements, button)
 	}
 
 	content := strings.TrimSpace(e.Text)

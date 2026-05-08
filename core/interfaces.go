@@ -231,6 +231,13 @@ type CardSender interface {
 // uses prefixes like "nav:/model" or "act:/model 3".
 type CardNavigationHandler func(action string, sessionKey string) *Card
 
+// CardSessionAliasRegistrar is implemented by platforms that can bind a
+// platform-specific session key (for example a Feishu topic root message) to an
+// existing engine session key created from a card action.
+type CardSessionAliasRegistrar interface {
+	SetCardSessionAliasRegistrar(func(aliasSessionKey, targetSessionKey string))
+}
+
 // CardNavigable is an optional interface for platforms that support in-place
 // card navigation (updating the existing card instead of sending a new message).
 type CardNavigable interface {

@@ -1627,6 +1627,18 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
 	}
+	if aliaser, ok := p.(CardSessionAliasRegistrar); ok {
+		aliaser.SetCardSessionAliasRegistrar(e.registerSessionAlias)
+	}
+}
+
+func (e *Engine) registerSessionAlias(aliasSessionKey, targetSessionKey string) {
+	if aliasSessionKey == "" || targetSessionKey == "" || aliasSessionKey == targetSessionKey {
+		return
+	}
+	_, targetSessions := e.sessionContextForKey(targetSessionKey)
+	targetSessions.RegisterSessionAlias(aliasSessionKey, targetSessionKey)
+	slog.Debug("session alias registered", "alias", aliasSessionKey, "target", targetSessionKey)
 }
 
 // matchBannedWord returns the first banned word found in content, or "".
@@ -2034,9 +2046,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
+	sessionUserKey := sessions.CanonicalUserKey(msg.SessionKey)
+	if sessionUserKey != msg.SessionKey {
+		interactiveKey = e.interactiveKeyForSessionKey(sessionUserKey)
+		if e.multiWorkspace && wsSessions != nil {
+			interactiveKey = resolvedWorkspace + ":" + sessionUserKey
+		}
+	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
-	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
+	sessions.UpdateUserMeta(sessionUserKey, msg.UserName, msg.ChatName)
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
@@ -2077,7 +2096,7 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, sessionUserKey)
 }
 
 func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions *SessionManager, interactiveKey string, session *Session) *Session {
@@ -3278,23 +3297,23 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if autoApprove {
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
-			reqID := event.RequestID
-			respondCtx := ctx // capture current unsolicited reader context
-			go func() {
-				// Run in a goroutine to keep reader iterations fast, but honour
-				// the reader's context so we don't call into a dead session after
-				// stopUnsolicitedReader cancels the context.
-				select {
-				case <-respondCtx.Done():
-					return
-				default:
-				}
-				if err := agentSession.RespondPermission(reqID, result); err != nil {
-					if respondCtx.Err() == nil {
-						slog.Error("unsolicited: failed to respond permission", "error", err)
+				reqID := event.RequestID
+				respondCtx := ctx // capture current unsolicited reader context
+				go func() {
+					// Run in a goroutine to keep reader iterations fast, but honour
+					// the reader's context so we don't call into a dead session after
+					// stopUnsolicitedReader cancels the context.
+					select {
+					case <-respondCtx.Done():
+						return
+					default:
 					}
-				}
-			}()
+					if err := agentSession.RespondPermission(reqID, result); err != nil {
+						if respondCtx.Err() == nil {
+							slog.Error("unsolicited: failed to respond permission", "error", err)
+						}
+					}
+				}()
 				if !autoApprove {
 					toolName := event.ToolName
 					if toolName == "" {
@@ -7096,6 +7115,17 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 	}
 
 	cb := NewCard().Title(e.i18n.T(MsgHelpTitle), "blue")
+
+	if current.key == defaultHelpGroup {
+		cb.Markdown("**Common Actions**\nStart with session list, new session, or current session.")
+		cb.ButtonsEqual(
+			PrimaryBtn("Session List", "nav:/list"),
+			DefaultBtn("New Session", "act:/new"),
+			DefaultBtn("Current", "nav:/current"),
+		)
+		cb.Divider()
+	}
+
 	var tabs []CardButton
 	for _, group := range groups {
 		btnType := "default"
@@ -7107,8 +7137,10 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 	for _, row := range splitHelpTabRows(true, tabs) {
 		cb.ButtonsEqual(row...)
 	}
+
+	cb.Markdown(sectionTitle(current.titleKey))
 	for _, item := range current.items {
-		cb.ListItem(commandText(item.command), "▶", item.action)
+		cb.ListItem(commandText(item.command), "Open", item.action)
 	}
 	cb.Note(e.i18n.T(MsgHelpTip))
 	return cb.Build()
@@ -8865,6 +8897,7 @@ func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspac
 				BtnType:  v.BtnType,
 				BtnValue: v.BtnValue,
 				Extra:    v.Extra,
+				Actions:  v.Actions,
 			})
 		default:
 			out.Elements = append(out.Elements, elem)
@@ -9109,7 +9142,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/new":
 		return e.renderCurrentCard(sessionKey)
 	case "/switch":
-		return e.renderListCardSafe(sessionKey, 1)
+		return e.renderCurrentCard(sessionKey)
 	case "/delete-one":
 		return e.renderDeleteOneCard(sessionKey, args)
 	case "/delete-mode":

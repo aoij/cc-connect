@@ -2612,6 +2612,60 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	}
 }
 
+func TestHandleMessage_SessionAliasContinuesCanonicalSession(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	agentSession := newResultAgentSession("alias reply")
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	canonical := "feishu:oc_chat:root:om_root"
+	alias := "feishu:oc_chat:root:omt_topic"
+	session := e.sessions.NewSession(canonical, "topic session")
+	session.SetAgentSessionID("existing-codex-thread", "codex")
+	e.registerSessionAlias(alias, canonical)
+
+	msg := &Message{
+		SessionKey: alias,
+		Platform:   "feishu",
+		ChannelKey: "oc_chat",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "continue from topic",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(session.GetHistory(0)) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for alias turn, sent=%v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := e.sessions.GetOrCreateActive(alias).ID; got != session.ID {
+		t.Fatalf("alias active session = %q, want canonical %q", got, session.ID)
+	}
+	history := session.GetHistory(0)
+	if history[0].Role != "user" || history[0].Content != "continue from topic" {
+		t.Fatalf("unexpected first history entry: %#v", history[0])
+	}
+	if history[1].Role != "assistant" || history[1].Content != "alias reply" {
+		t.Fatalf("unexpected assistant history: %#v", history[1])
+	}
+	if len(agentSession.sentPrompts) != 1 || agentSession.sentPrompts[0] != "continue from topic" {
+		t.Fatalf("sent prompt = %#v, want clean user content", agentSession.sentPrompts)
+	}
+	if strings.Contains(agentSession.sentPrompts[0], "omt_topic") {
+		t.Fatalf("sent prompt leaked topic alias instead of canonical session key: %q", agentSession.sentPrompts[0])
+	}
+}
+
 func TestHandleMessage_AutoResetOnIdle_RotatesToNewSession(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	agentSession := newResultAgentSession("fresh reply")
@@ -5079,8 +5133,8 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	if !strings.Contains(text, "**/new**") {
 		t.Fatalf("default help text = %q, want session commands", text)
 	}
-	if strings.Contains(text, "**Session Management**") {
-		t.Fatalf("default help text = %q, should not repeat tab title in body", text)
+	if !strings.Contains(text, "Common") {
+		t.Fatalf("default help text = %q, want common entry section", text)
 	}
 	if strings.Contains(text, "**/model**") {
 		t.Fatalf("default help text = %q, should not include agent commands", text)
@@ -5099,8 +5153,8 @@ func TestHandleCardNav_HelpSwitchesTabs(t *testing.T) {
 	if !strings.Contains(text, "**/model**") {
 		t.Fatalf("agent help text = %q, want agent commands", text)
 	}
-	if strings.Contains(text, "**Agent Configuration**") {
-		t.Fatalf("agent help text = %q, should not repeat tab title in body", text)
+	if !strings.Contains(text, "Agent Configuration") {
+		t.Fatalf("agent help text = %q, want agent section title", text)
 	}
 	if strings.Contains(text, "**/new**") {
 		t.Fatalf("agent help text = %q, should not include session commands", text)

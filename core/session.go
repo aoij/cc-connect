@@ -214,14 +214,15 @@ type sessionSnapshot struct {
 // SessionManager supports multiple named sessions per user with active-session tracking.
 // It can persist state to a JSON file and reload on startup.
 type SessionManager struct {
-	mu            sync.RWMutex
-	sessions      map[string]*Session
-	activeSession map[string]string
-	userSessions  map[string][]string
-	sessionNames  map[string]string    // agent session ID → custom name
-	userMeta      map[string]*UserMeta // sessionKey → display info
-	counter       int64
-	storePath     string // empty = no persistence
+	mu             sync.RWMutex
+	sessions       map[string]*Session
+	activeSession  map[string]string
+	userSessions   map[string][]string
+	sessionNames   map[string]string    // agent session ID → custom name
+	userMeta       map[string]*UserMeta // sessionKey → display info
+	sessionAliases map[string]string    // alias userKey/sessionKey → canonical userKey/sessionKey
+	counter        int64
+	storePath      string // empty = no persistence
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -232,12 +233,13 @@ type SessionManager struct {
 
 func NewSessionManager(storePath string) *SessionManager {
 	sm := &SessionManager{
-		sessions:      make(map[string]*Session),
-		activeSession: make(map[string]string),
-		userSessions:  make(map[string][]string),
-		sessionNames:  make(map[string]string),
-		userMeta:      make(map[string]*UserMeta),
-		storePath:     storePath,
+		sessions:       make(map[string]*Session),
+		activeSession:  make(map[string]string),
+		userSessions:   make(map[string][]string),
+		sessionNames:   make(map[string]string),
+		userMeta:       make(map[string]*UserMeta),
+		sessionAliases: make(map[string]string),
+		storePath:      storePath,
 	}
 	if storePath != "" {
 		sm.load()
@@ -255,10 +257,47 @@ func (sm *SessionManager) nextID() string {
 	return fmt.Sprintf("s%d", sm.counter)
 }
 
+func (sm *SessionManager) canonicalUserKeyLocked(userKey string) string {
+	if sm.sessionAliases == nil {
+		return userKey
+	}
+	seen := map[string]bool{}
+	for {
+		target := sm.sessionAliases[userKey]
+		if target == "" || seen[userKey] {
+			return userKey
+		}
+		seen[userKey] = true
+		userKey = target
+	}
+}
+
+// RegisterSessionAlias makes aliasUserKey share the active internal session of
+// targetUserKey. Aliases are runtime-only and intentionally not persisted.
+func (sm *SessionManager) RegisterSessionAlias(aliasUserKey, targetUserKey string) {
+	if aliasUserKey == "" || targetUserKey == "" || aliasUserKey == targetUserKey {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.sessionAliases == nil {
+		sm.sessionAliases = make(map[string]string)
+	}
+	sm.sessionAliases[aliasUserKey] = sm.canonicalUserKeyLocked(targetUserKey)
+}
+
+// CanonicalUserKey resolves a runtime session alias to the canonical user key.
+func (sm *SessionManager) CanonicalUserKey(userKey string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.canonicalUserKeyLocked(userKey)
+}
+
 func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	userKey = sm.canonicalUserKeyLocked(userKey)
 	if sid, ok := sm.activeSession[userKey]; ok {
 		if s, ok := sm.sessions[sid]; ok {
 			return s
@@ -272,6 +311,7 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 func (sm *SessionManager) NewSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.canonicalUserKeyLocked(userKey)
 	s := sm.createLocked(userKey, name)
 	sm.saveLocked()
 	return s
@@ -283,6 +323,7 @@ func (sm *SessionManager) NewSession(userKey, name string) *Session {
 func (sm *SessionManager) NewSideSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.canonicalUserKeyLocked(userKey)
 	id := sm.nextID()
 	now := time.Now()
 	s := &Session{
@@ -315,6 +356,7 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.canonicalUserKeyLocked(userKey)
 
 	for _, sid := range sm.userSessions[userKey] {
 		s := sm.sessions[sid]
@@ -334,6 +376,7 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, summary string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.canonicalUserKeyLocked(userKey)
 
 	for _, sid := range sm.userSessions[userKey] {
 		s := sm.sessions[sid]
@@ -359,6 +402,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	userKey = sm.canonicalUserKeyLocked(userKey)
 
 	ids := sm.userSessions[userKey]
 	out := make([]*Session, 0, len(ids))
@@ -373,6 +417,7 @@ func (sm *SessionManager) ListSessions(userKey string) []*Session {
 func (sm *SessionManager) ActiveSessionID(userKey string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	userKey = sm.canonicalUserKeyLocked(userKey)
 	return sm.activeSession[userKey]
 }
 
@@ -403,6 +448,7 @@ func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) 
 	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sessionKey = sm.canonicalUserKeyLocked(sessionKey)
 	meta, ok := sm.userMeta[sessionKey]
 	if !ok {
 		meta = &UserMeta{}
@@ -420,6 +466,7 @@ func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) 
 func (sm *SessionManager) GetUserMeta(sessionKey string) *UserMeta {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	sessionKey = sm.canonicalUserKeyLocked(sessionKey)
 	m := sm.userMeta[sessionKey]
 	if m == nil {
 		return nil
@@ -478,6 +525,7 @@ func (sm *SessionManager) SessionKeyMap() (idToKey map[string]string, activeIDs 
 	idToKey = make(map[string]string, len(sm.sessions))
 	activeIDs = make(map[string]bool)
 	for userKey, ids := range sm.userSessions {
+		userKey = sm.canonicalUserKeyLocked(userKey)
 		for _, sid := range ids {
 			idToKey[sid] = userKey
 		}

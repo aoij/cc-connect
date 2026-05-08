@@ -666,6 +666,10 @@ func (bp *BridgePlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	bp.navHandler = h
 }
 
+func (bp *BridgePlatform) SetCardSessionAliasRegistrar(func(aliasSessionKey, targetSessionKey string)) {
+	// Bridge adapters do not currently expose a native topic/thread alias flow.
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket connection handling (on BridgeServer)
 // ---------------------------------------------------------------------------
