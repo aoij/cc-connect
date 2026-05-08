@@ -1660,6 +1660,10 @@ func countCardActionValues(card *Card, prefix string) int {
 			} else if strings.HasPrefix(e.BtnValue, prefix) {
 				count++
 			}
+		case CardCommandInput:
+			if strings.HasPrefix(e.Action, prefix) {
+				count++
+			}
 		}
 	}
 	return count
@@ -1683,6 +1687,10 @@ func findCardAction(card *Card, value string) (CardButton, bool) {
 				}
 			} else if e.BtnValue == value {
 				return CardButton{Text: e.BtnText, Type: e.BtnType, Value: e.BtnValue, Extra: e.Extra}, true
+			}
+		case CardCommandInput:
+			if e.Action == value {
+				return CardButton{Text: e.ButtonText, Type: e.ButtonType, Value: e.Action, Extra: e.Extra}, true
 			}
 		}
 	}
@@ -5199,6 +5207,39 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	}
 	if strings.Contains(text, "**/model**") {
 		t.Fatalf("default help text = %q, should not include agent commands", text)
+	}
+}
+
+func findHelpCommandInput(card *Card, command string) (CardCommandInput, bool) {
+	for _, elem := range card.Elements {
+		if input, ok := elem.(CardCommandInput); ok && input.Command == command {
+			return input, true
+		}
+	}
+	return CardCommandInput{}, false
+}
+
+func TestRenderHelpCard_SessionCommandsUseInputForms(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	card := e.renderHelpCard()
+
+	switchInput, ok := findHelpCommandInput(card, "/switch")
+	if !ok {
+		t.Fatal("expected /switch command input")
+	}
+	if switchInput.Action != "act:/help-command" || switchInput.ButtonText != "Switch" || !switchInput.Required {
+		t.Fatalf("/switch input = %#v, want help-command Switch required", switchInput)
+	}
+	if !strings.Contains(switchInput.Placeholder, "2") {
+		t.Fatalf("/switch placeholder = %q, want example", switchInput.Placeholder)
+	}
+
+	deleteInput, ok := findHelpCommandInput(card, "/delete")
+	if !ok {
+		t.Fatal("expected /delete command input")
+	}
+	if deleteInput.ButtonType != "danger" || !deleteInput.Required {
+		t.Fatalf("/delete input = %#v, want danger required", deleteInput)
 	}
 }
 

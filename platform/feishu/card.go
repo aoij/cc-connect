@@ -184,6 +184,8 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 			}
 		case core.CardListItem:
 			elements = append(elements, renderCardListItemElements(e, sessionKey)...)
+		case core.CardCommandInput:
+			elements = append(elements, renderCardCommandInputElement(e, sessionKey))
 		case core.CardSelect:
 			var options []map[string]any
 			for _, opt := range e.Options {
@@ -220,6 +222,103 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	}
 
 	result["elements"] = elements
+	return result
+}
+
+const helpCommandArgsInputName = "cc_command_args"
+
+func renderCardCommandInputElement(e core.CardCommandInput, sessionKey string) map[string]any {
+	buttonType := e.ButtonType
+	if buttonType == "" {
+		buttonType = "default"
+	}
+	buttonText := e.ButtonText
+	if buttonText == "" {
+		buttonText = "执行"
+	}
+	actionVal := e.Action
+	if actionVal == "" {
+		actionVal = "act:/help-command"
+	}
+	valMap := map[string]string{
+		"action":  actionVal,
+		"command": e.Command,
+	}
+	if sessionKey != "" {
+		valMap["session_key"] = sessionKey
+	}
+	if e.Required {
+		valMap["args_required"] = "true"
+	}
+	for k, v := range e.Extra {
+		valMap[k] = v
+	}
+
+	title := strings.TrimSpace(e.Title)
+	if title == "" {
+		title = "**" + e.Command + "**"
+	}
+	content := title
+	if desc := strings.TrimSpace(e.Description); desc != "" {
+		content += "\n<font color=\"grey\">" + desc + "</font>"
+	}
+	if e.Required {
+		content += "\n<font color=\"red\">需要填写参数后再执行</font>"
+	}
+
+	formElements := []map[string]any{{
+		"tag":     "markdown",
+		"content": content,
+	}}
+	if strings.TrimSpace(e.Placeholder) != "" || strings.TrimSpace(e.DefaultValue) != "" || e.Required {
+		input := map[string]any{
+			"tag":         "input",
+			"name":        helpCommandArgsInputName,
+			"placeholder": plainText(e.Placeholder),
+		}
+		if e.DefaultValue != "" {
+			input["default_value"] = e.DefaultValue
+		}
+		formElements = append(formElements, input)
+	}
+
+	formElements = append(formElements, map[string]any{
+		"tag": "action",
+		"actions": []map[string]any{{
+			"tag":              "button",
+			"text":             plainText(buttonText),
+			"type":             buttonType,
+			"name":             "cc_command_submit",
+			"form_action_type": "submit",
+			"value":            valMap,
+		}},
+	})
+
+	return map[string]any{
+		"tag":      "form",
+		"name":     "cc_command_form_" + sanitizeCardFormName(e.Command),
+		"elements": formElements,
+	}
+}
+
+func sanitizeCardFormName(command string) string {
+	name := strings.TrimSpace(strings.TrimPrefix(command, "/"))
+	if name == "" {
+		return "command"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	result := strings.Trim(b.String(), "_")
+	if result == "" {
+		return "command"
+	}
 	return result
 }
 

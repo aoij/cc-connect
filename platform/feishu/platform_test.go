@@ -1984,3 +1984,86 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 		t.Fatalf("expected HTML-escaped name, got %q", result)
 	}
 }
+
+func TestInteractivePlatform_HelpCommandFormSubmitDispatchesCommandWithArgs(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{
+				Name: "cc_command_submit",
+				Value: map[string]any{
+					"action":      "act:/help-command",
+					"command":     "/switch",
+					"session_key": "feishu:oc_test_chat:root:om_root",
+				},
+				FormValue: map[string]any{helpCommandArgsInputName: "2"},
+			},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || !strings.Contains(resp.Toast.Content, "/switch 2") {
+		t.Fatalf("toast = %#v, want executed switch command", resp)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_test_chat:root:om_root" {
+			t.Fatalf("SessionKey = %q, want card session key", msg.SessionKey)
+		}
+		if msg.Content != "/switch 2" {
+			t.Fatalf("Content = %q, want /switch 2", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card command dispatch")
+	}
+}
+
+func TestInteractivePlatform_HelpCommandFormSubmitRequiresArgs(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) { msgCh <- msg }
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{
+				Name: "cc_command_submit",
+				Value: map[string]any{
+					"action":        "act:/help-command",
+					"command":       "/delete",
+					"args_required": "true",
+				},
+			},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "error" {
+		t.Fatalf("toast = %#v, want required-args error", resp)
+	}
+	select {
+	case msg := <-msgCh:
+		t.Fatalf("unexpected dispatch: %#v", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

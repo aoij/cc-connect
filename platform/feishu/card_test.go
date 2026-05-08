@@ -346,3 +346,31 @@ func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 		t.Fatalf("select session_key = %#v, want thread session key", selectValue["session_key"])
 	}
 }
+
+func TestRenderCardMap_CommandInputUsesSubmitForm(t *testing.T) {
+	card := core.NewCard().
+		CommandInput("/switch", "**/switch** Resume", "Args: `<index / id>`", "e.g. 2", "Switch", "primary", "act:/help-command", nil, true).
+		Build()
+
+	got := renderCardMap(card, "feishu:oc_chat:root:om_root")
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal rendered card failed: %v", err)
+	}
+	s := string(raw)
+	for _, want := range []string{
+		`"tag":"form"`,
+		`"tag":"input"`,
+		`"name":"cc_command_args"`,
+		`"name":"cc_command_submit"`,
+		`"form_action_type":"submit"`,
+		`"action":"act:/help-command"`,
+		`"command":"/switch"`,
+		`"session_key":"feishu:oc_chat:root:om_root"`,
+		`"args_required":"true"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("rendered command input missing %s, got %s", want, s)
+		}
+	}
+}

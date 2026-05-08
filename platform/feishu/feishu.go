@@ -506,6 +506,104 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp.Body)
 }
 
+func stringFromCardValue(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case fmt.Stringer:
+		return strings.TrimSpace(x.String())
+	case []string:
+		return strings.TrimSpace(strings.Join(x, ","))
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			part := strings.TrimSpace(fmt.Sprint(item))
+			if part != "" {
+				parts = append(parts, part)
+			}
+		}
+		return strings.Join(parts, ",")
+	default:
+		return strings.TrimSpace(fmt.Sprint(x))
+	}
+}
+
+func boolFromCardValue(m map[string]any, key string) bool {
+	if m == nil {
+		return false
+	}
+	switch v := m[key].(type) {
+	case bool:
+		return v
+	case string:
+		s := strings.TrimSpace(strings.ToLower(v))
+		return s == "1" || s == "true" || s == "yes" || s == "y"
+	default:
+		return false
+	}
+}
+
+func buildHelpCommandFromCardAction(value map[string]any, formValue map[string]any, inputValue string) (string, string, bool) {
+	command := stringFromCardValue(value, "command")
+	if command == "" {
+		return "", "", false
+	}
+	if !strings.HasPrefix(command, "/") {
+		command = "/" + command
+	}
+	args := stringFromCardValue(formValue, helpCommandArgsInputName)
+	if args == "" {
+		args = strings.TrimSpace(inputValue)
+	}
+	if args == "" {
+		args = stringFromCardValue(value, "default_args")
+	}
+	if args == "" && boolFromCardValue(value, "args_required") {
+		return command, "", false
+	}
+	if args != "" {
+		return command + " " + args, command, true
+	}
+	return command, command, true
+}
+
+func (p *Platform) dispatchCardCommandMessage(event *callback.CardActionTriggerEvent, sessionKey, content string) {
+	if p.handler == nil || event == nil || event.Event == nil {
+		return
+	}
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+	chatID := ""
+	messageID := ""
+	if event.Event.Context != nil {
+		chatID = event.Event.Context.OpenChatID
+		messageID = event.Event.Context.OpenMessageID
+	}
+	if chatID == "" {
+		chatID = userID
+	}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	go p.handler(p.dispatchPlatform(), &core.Message{
+		SessionKey: sessionKey,
+		Platform:   p.platformName,
+		ChannelKey: chatID,
+		UserID:     userID,
+		UserName:   p.resolveUserName(userID),
+		ChatName:   p.resolveChatName(chatID),
+		Content:    content,
+		ReplyCtx:   rctx,
+	})
+}
+
 // onCardAction handles card.action.trigger callbacks via the official SDK event dispatcher.
 // Three prefixes are supported:
 //   - nav:/xxx   — render a card page and update the original card in-place
@@ -535,6 +633,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			actionVal = "act:/delete-mode form-submit"
 		case "delete_mode_cancel":
 			actionVal = "act:/delete-mode cancel"
+		case "cc_command_submit":
+			actionVal = "act:/help-command"
 		}
 	}
 	if actionVal == "act:/delete-mode form-submit" {
@@ -558,6 +658,54 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+
+	if actionVal == "act:/help-command" {
+		cmdText, command, ok := buildHelpCommandFromCardAction(event.Event.Action.Value, event.Event.Action.FormValue, event.Event.Action.InputValue)
+		if !ok {
+			label := command
+			if label == "" {
+				label = "Command"
+			}
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{Type: "error", Content: label + " needs args"},
+			}, nil
+		}
+		actionMode, _ := event.Event.Action.Value["action_mode"].(string)
+		if p.threadIsolation && chatID != "" && (actionMode == "thread_new_session" || actionMode == "thread_current_session") {
+			rootText := buildActionThreadTitle(actionMode, cmdText, event.Event.Action.Value)
+			rootMsgID, err := p.createThreadRootMessage(context.Background(), chatID, rootText)
+			if err != nil {
+				slog.Error(p.tag()+": create thread root for help command failed", "action_mode", actionMode, "chat_id", chatID, "error", err)
+				return &callback.CardActionTriggerResponse{
+					Toast: &callback.Toast{Type: "error", Content: "创建新话题失败"},
+				}, nil
+			}
+			p.markBotThreadRoot(rootMsgID)
+			newSessionKey := fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootMsgID)
+			p.rememberTopicRootTitle(rootMsgID, rootText)
+			newReplyCtx := replyContext{messageID: rootMsgID, chatID: chatID, sessionKey: newSessionKey}
+			go func() {
+				p.handler(p.dispatchPlatform(), &core.Message{
+					SessionKey: newSessionKey,
+					Platform:   p.platformName,
+					ChannelKey: chatID,
+					UserID:     userID,
+					UserName:   p.resolveUserName(userID),
+					ChatName:   p.resolveChatName(chatID),
+					Content:    cmdText,
+					ReplyCtx:   newReplyCtx,
+				})
+				p.registerThreadAliasFromRootAsync(chatID, rootMsgID, newSessionKey)
+			}()
+			return &callback.CardActionTriggerResponse{
+				Toast: &callback.Toast{Type: "success", Content: "executed in new topic: " + cmdText},
+			}, nil
+		}
+		p.dispatchCardCommandMessage(event, sessionKey, cmdText)
+		return &callback.CardActionTriggerResponse{
+			Toast: &callback.Toast{Type: "success", Content: "executed: " + cmdText},
+		}, nil
+	}
 
 	if p.threadIsolation && chatID != "" {
 		actionMode, _ := event.Event.Action.Value["action_mode"].(string)
@@ -3416,7 +3564,7 @@ func buildCommandThreadTitle(commandText string) (string, bool) {
 		label = sanitizeThreadTitle(commandText)
 	}
 	if label == "" {
-		label = "命令"
+		label = "Command"
 	}
 	return "Codex｜" + truncateThreadTitle(label, 36), true
 }
