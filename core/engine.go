@@ -9108,6 +9108,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderCurrentCard(sessionKey)
 	case "/switch":
 		return e.renderListCardSafe(sessionKey, 1)
+	case "/delete-one":
+		return e.renderDeleteOneCard(sessionKey, args)
 	case "/delete-mode":
 		if strings.HasPrefix(args, "cancel") {
 			return e.renderListCardSafe(sessionKey, 1)
@@ -9336,6 +9338,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	case "/delete-mode":
 		e.executeDeleteModeAction(sessionKey, args)
 
+	case "/delete-one":
+		e.executeDeleteOneAction(sessionKey, args)
+
 	case "/switch":
 		if args == "" {
 			return
@@ -9512,6 +9517,46 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 		return e.renderDeleteModeDeletingCard(dm)
 	default:
 		return e.renderDeleteModeSelectCard(sessionKey, sessions, dm, agentSessions)
+	}
+}
+
+func (e *Engine) renderDeleteOneCard(sessionKey, args string) *Card {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return e.simpleCard(e.i18n.T(MsgDeleteModeConfirmTitle), "carmine", e.i18n.T(MsgDeleteUsage))
+	}
+	phase := fields[0]
+	switch phase {
+	case "ask":
+		if len(fields) < 2 {
+			return e.renderListCardSafe(sessionKey, 1)
+		}
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		agentSessions, err := agent.ListSessions(e.ctx)
+		if err != nil {
+			return e.simpleCard(e.i18n.T(MsgDeleteModeConfirmTitle), "red", err.Error())
+		}
+		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		matched := e.matchSession(agentSessions, sessions, fields[1])
+		if matched == nil {
+			return e.simpleCard(e.i18n.T(MsgDeleteModeConfirmTitle), "red", fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), fields[1]))
+		}
+		displayName := e.deleteSessionDisplayName(sessions, matched)
+		return NewCard().
+			Title("确认删除会话", "carmine").
+			Markdown(fmt.Sprintf("将删除：**%s**\n\n此操作不可恢复。", displayName)).
+			Buttons(
+				DangerBtn("确认删除", "act:/delete-one confirm "+fields[1]),
+				DefaultBtn("取消", "nav:/list 1"),
+			).
+			Build()
+	case "confirm":
+		if len(fields) < 2 {
+			return e.renderListCardSafe(sessionKey, 1)
+		}
+		return e.simpleCard(e.i18n.T(MsgDeleteModeResultTitle), "turquoise", e.deleteOneSessionByQuery(sessionKey, fields[1]))
+	default:
+		return e.renderListCardSafe(sessionKey, 1)
 	}
 }
 
@@ -9841,6 +9886,33 @@ func (e *Engine) executeDeleteModeAction(sessionKey, args string) {
 	}
 }
 
+func (e *Engine) executeDeleteOneAction(sessionKey, args string) {
+	fields := strings.Fields(args)
+	if len(fields) < 2 || fields[0] != "confirm" {
+		return
+	}
+	// The confirmation card renderer performs the deletion so the updated card
+	// can show the exact result without relying on side effects from executeCardAction.
+}
+
+func (e *Engine) deleteOneSessionByQuery(sessionKey, query string) string {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	deleter, ok := agent.(SessionDeleter)
+	if !ok {
+		return e.i18n.T(MsgDeleteNotSupported)
+	}
+	agentSessions, err := agent.ListSessions(e.ctx)
+	if err != nil {
+		return e.i18n.Tf(MsgError, err)
+	}
+	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	matched := e.matchSession(agentSessions, sessions, query)
+	if matched == nil {
+		return fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query)
+	}
+	return e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, matched)
+}
+
 func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for _, arg := range args {
@@ -10129,12 +10201,16 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		if s.ID == activeAgentID {
 			btnType = "primary"
 		}
-		cb.ListItemBtnExtra(
+		switchExtra := map[string]string{"session_title": displayName}
+		newThreadExtra := map[string]string{"action_mode": "switch_session", "session_title": displayName}
+		if s.ID == activeAgentID {
+			switchExtra["action_mode"] = "switch_current"
+		}
+		cb.ListItemActions(
 			e.i18n.Tf(MsgListItem, marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")),
-			fmt.Sprintf("#%d", i+1),
-			btnType,
-			fmt.Sprintf("act:/switch %d", i+1),
-			map[string]string{"action_mode": "switch_session", "session_title": displayName},
+			CardButton{Text: "进入", Type: btnType, Value: fmt.Sprintf("act:/switch %d", i+1), Extra: switchExtra},
+			CardButton{Text: "新话题", Type: "default", Value: fmt.Sprintf("act:/switch %d", i+1), Extra: newThreadExtra},
+			CardButton{Text: "删除", Type: "danger", Value: fmt.Sprintf("act:/delete-one ask %d", i+1)},
 		)
 	}
 

@@ -178,16 +178,34 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				}
 			}
 		case core.CardListItem:
-			btnType := e.BtnType
-			if btnType == "" {
-				btnType = "default"
+			actionButtons := e.Actions
+			if len(actionButtons) == 0 {
+				actionButtons = []core.CardButton{{
+					Text:  e.BtnText,
+					Type:  e.BtnType,
+					Value: e.BtnValue,
+					Extra: e.Extra,
+				}}
 			}
-			valMap := map[string]string{"action": e.BtnValue}
-			if sessionKey != "" {
-				valMap["session_key"] = sessionKey
-			}
-			for k, v := range e.Extra {
-				valMap[k] = v
+			actionElems := make([]map[string]any, 0, len(actionButtons))
+			for _, btn := range actionButtons {
+				btnType := btn.Type
+				if btnType == "" {
+					btnType = "default"
+				}
+				valMap := map[string]string{"action": btn.Value}
+				if sessionKey != "" {
+					valMap["session_key"] = sessionKey
+				}
+				for k, v := range btn.Extra {
+					valMap[k] = v
+				}
+				actionElems = append(actionElems, map[string]any{
+					"tag":   "button",
+					"text":  plainText(btn.Text),
+					"type":  btnType,
+					"value": valMap,
+				})
 			}
 			elements = append(elements, map[string]any{
 				"tag":       "column_set",
@@ -196,7 +214,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 					{
 						"tag":            "column",
 						"width":          "weighted",
-						"weight":         5,
+						"weight":         6,
 						"vertical_align": "center",
 						"elements": []map[string]any{
 							{
@@ -209,14 +227,7 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 						"tag":            "column",
 						"width":          "auto",
 						"vertical_align": "center",
-						"elements": []map[string]any{
-							{
-								"tag":   "button",
-								"text":  plainText(e.BtnText),
-								"type":  btnType,
-								"value": valMap,
-							},
-						},
+						"elements":       actionElems,
 					},
 				},
 			})

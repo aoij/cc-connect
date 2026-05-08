@@ -267,6 +267,37 @@ func TestRenderCardMap_ListItemExtraPropsArePreserved(t *testing.T) {
 	}
 }
 
+func TestRenderCardMap_ListItemActionsRenderMultipleButtons(t *testing.T) {
+	card := core.NewCard().
+		ListItemActions("Session one",
+			core.CardButton{Text: "进入", Type: "primary", Value: "act:/switch 1"},
+			core.CardButton{Text: "新话题", Type: "default", Value: "act:/switch 1", Extra: map[string]string{"action_mode": "switch_session"}},
+			core.CardButton{Text: "删除", Type: "danger", Value: "act:/delete-one ask 1"},
+		).
+		Build()
+
+	got := decodeRenderedCard(t, card)
+	elements, ok := got["elements"].([]any)
+	if !ok || len(elements) != 1 {
+		t.Fatalf("elements = %#v, want one element", got["elements"])
+	}
+	row := elements[0].(map[string]any)
+	columns := row["columns"].([]any)
+	actionCol := columns[1].(map[string]any)
+	inner := actionCol["elements"].([]any)
+	if len(inner) != 3 {
+		t.Fatalf("action buttons = %d, want 3", len(inner))
+	}
+	deleteBtn := inner[2].(map[string]any)
+	if deleteBtn["type"] != "danger" {
+		t.Fatalf("delete button type = %#v, want danger", deleteBtn["type"])
+	}
+	deleteValue := deleteBtn["value"].(map[string]any)
+	if deleteValue["action"] != "act:/delete-one ask 1" {
+		t.Fatalf("delete action = %#v, want act:/delete-one ask 1", deleteValue["action"])
+	}
+}
+
 func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 	card := core.NewCard().
 		Buttons(core.PrimaryBtn("Open", "nav:/help session")).

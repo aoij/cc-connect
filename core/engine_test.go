@@ -1651,7 +1651,13 @@ func countCardActionValues(card *Card, prefix string) int {
 				}
 			}
 		case CardListItem:
-			if strings.HasPrefix(e.BtnValue, prefix) {
+			if len(e.Actions) > 0 {
+				for _, btn := range e.Actions {
+					if strings.HasPrefix(btn.Value, prefix) {
+						count++
+					}
+				}
+			} else if strings.HasPrefix(e.BtnValue, prefix) {
 				count++
 			}
 		}
@@ -1669,8 +1675,14 @@ func findCardAction(card *Card, value string) (CardButton, bool) {
 				}
 			}
 		case CardListItem:
-			if e.BtnValue == value {
-				return CardButton{Text: e.BtnText, Type: e.BtnType, Value: e.BtnValue}, true
+			if len(e.Actions) > 0 {
+				for _, btn := range e.Actions {
+					if btn.Value == value {
+						return btn, true
+					}
+				}
+			} else if e.BtnValue == value {
+				return CardButton{Text: e.BtnText, Type: e.BtnType, Value: e.BtnValue, Extra: e.Extra}, true
 			}
 		}
 	}
@@ -3075,6 +3087,33 @@ func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
 	}
 	if got := e.sessions.FindByID(keep.ID); got == nil {
 		t.Fatal("keep session should remain")
+	}
+}
+
+func TestHandleCardNav_DeleteOneConfirmsThenDeletes(t *testing.T) {
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+		{ID: "session-2", Summary: "Two"},
+	}}}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	sessionKey := "test:user1"
+	active := e.sessions.NewSession(sessionKey, "active")
+	active.SetAgentSessionID("session-2", "test")
+
+	confirm := e.handleCardNav("act:/delete-one ask 1", sessionKey)
+	if confirm == nil || !strings.Contains(confirm.RenderText(), "One") {
+		t.Fatalf("confirm card = %#v, want session name", confirm)
+	}
+	if len(agent.deleted) != 0 {
+		t.Fatalf("deleted before confirm = %v, want none", agent.deleted)
+	}
+
+	result := e.handleCardNav("act:/delete-one confirm 1", sessionKey)
+	if result == nil || !strings.Contains(result.RenderText(), "Session deleted: One") {
+		t.Fatalf("result card text = %q, want delete result", result.RenderText())
+	}
+	if got, want := strings.Join(agent.deleted, ","), "session-1"; got != want {
+		t.Fatalf("deleted = %q, want %q", got, want)
 	}
 }
 
@@ -4909,7 +4948,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 		t.Fatalf("renderListCard returned error: %v", err)
 	}
 
-	if got := countCardActionValues(card, "act:/switch "); got != len(sessions) {
+	if got := countCardActionValues(card, "act:/switch "); got != len(sessions)*2 {
 		t.Fatalf("switch action count = %d, want %d", got, len(sessions))
 	}
 
@@ -4922,7 +4961,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 	}
 }
 
-func TestRenderListCard_SwitchButtonsCarryActionMode(t *testing.T) {
+func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
 	sessions := []AgentSessionInfo{
 		{ID: "session-1", Summary: "Session one", MessageCount: 1, ModifiedAt: time.Now()},
 	}
@@ -4941,11 +4980,26 @@ func TestRenderListCard_SwitchButtonsCarryActionMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("first element = %T, want CardListItem", card.Elements[0])
 	}
-	if item.Extra["action_mode"] != "switch_session" {
-		t.Fatalf("action_mode = %q, want switch_session", item.Extra["action_mode"])
+	if len(item.Actions) != 3 {
+		t.Fatalf("actions = %d, want 3", len(item.Actions))
 	}
-	if item.Extra["session_title"] != "Session one" {
-		t.Fatalf("session_title = %q, want Session one", item.Extra["session_title"])
+	if item.Actions[0].Text != "进入" || item.Actions[0].Value != "act:/switch 1" {
+		t.Fatalf("first action = %#v, want enter switch", item.Actions[0])
+	}
+	if item.Actions[0].Extra["action_mode"] == "switch_session" {
+		t.Fatalf("enter action should not create a new thread: %#v", item.Actions[0].Extra)
+	}
+	if item.Actions[1].Text != "新话题" || item.Actions[1].Value != "act:/switch 1" {
+		t.Fatalf("second action = %#v, want new topic switch", item.Actions[1])
+	}
+	if item.Actions[1].Extra["action_mode"] != "switch_session" {
+		t.Fatalf("new topic action_mode = %q, want switch_session", item.Actions[1].Extra["action_mode"])
+	}
+	if item.Actions[1].Extra["session_title"] != "Session one" {
+		t.Fatalf("session_title = %q, want Session one", item.Actions[1].Extra["session_title"])
+	}
+	if item.Actions[2].Text != "删除" || item.Actions[2].Value != "act:/delete-one ask 1" || item.Actions[2].Type != "danger" {
+		t.Fatalf("third action = %#v, want delete-one ask", item.Actions[2])
 	}
 }
 
@@ -11433,9 +11487,9 @@ func TestRenderListCard_AllSessionsVisibleAfterRepeatedNew(t *testing.T) {
 	}
 
 	switchActions := countCardActionValues(card, "act:/switch ")
-	if switchActions != len(agentSessions) {
+	if switchActions != len(agentSessions)*2 {
 		t.Fatalf("card switch actions = %d, want %d (some sessions hidden by filter)",
-			switchActions, len(agentSessions))
+			switchActions, len(agentSessions)*2)
 	}
 }
 
@@ -11819,8 +11873,8 @@ func TestFilterExternalSessions_RenderListCard(t *testing.T) {
 			t.Fatalf("renderListCard: %v", err)
 		}
 		switchActions := countCardActionValues(card, "act:/switch ")
-		if switchActions != len(agentSessions) {
-			t.Errorf("default mode: card should show %d sessions, got %d", len(agentSessions), switchActions)
+		if switchActions != len(agentSessions)*2 {
+			t.Errorf("default mode: card should show %d switch actions, got %d", len(agentSessions)*2, switchActions)
 		}
 	})
 
@@ -11831,8 +11885,8 @@ func TestFilterExternalSessions_RenderListCard(t *testing.T) {
 			t.Fatalf("renderListCard: %v", err)
 		}
 		switchActions := countCardActionValues(card, "act:/switch ")
-		if switchActions != 2 {
-			t.Errorf("filter enabled: card should show 2 tracked sessions, got %d", switchActions)
+		if switchActions != 4 {
+			t.Errorf("filter enabled: card should show 4 tracked switch actions, got %d", switchActions)
 		}
 	})
 }

@@ -52,6 +52,7 @@ type CardListItem struct {
 	BtnType  string            // "primary", "default", "danger"
 	BtnValue string            // callback data
 	Extra    map[string]string // additional key-value pairs carried in the callback
+	Actions  []CardButton      // optional multi-button actions; when set, Btn* fields are ignored by rich renderers
 }
 
 // CardSelect renders a dropdown selector.
@@ -190,6 +191,14 @@ func (b *CardBuilder) ListItemBtnExtra(desc, btnText, btnType, btnValue string, 
 	return b
 }
 
+// ListItemActions appends a list row with multiple action buttons.
+func (b *CardBuilder) ListItemActions(desc string, actions ...CardButton) *CardBuilder {
+	b.card.Elements = append(b.card.Elements, CardListItem{
+		Text: desc, Actions: actions,
+	})
+	return b
+}
+
 // Select appends a dropdown selector element.
 func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, initValue string) *CardBuilder {
 	if len(options) > 0 {
@@ -254,9 +263,16 @@ func (c *Card) RenderText() string {
 			sb.WriteString("\n\n")
 		case CardListItem:
 			sb.WriteString(e.Text)
-			sb.WriteString("  [")
-			sb.WriteString(e.BtnText)
-			sb.WriteString("]\n")
+			buttons := e.Actions
+			if len(buttons) == 0 && e.BtnText != "" {
+				buttons = []CardButton{{Text: e.BtnText, Value: e.BtnValue}}
+			}
+			for _, btn := range buttons {
+				sb.WriteString("  [")
+				sb.WriteString(btn.Text)
+				sb.WriteString("]")
+			}
+			sb.WriteString("\n")
 		case CardSelect:
 			sb.WriteString(e.Placeholder)
 			sb.WriteString(": ")
@@ -303,7 +319,17 @@ func (c *Card) CollectButtons() [][]ButtonOption {
 				rows = append(rows, row)
 			}
 		case CardListItem:
-			rows = append(rows, []ButtonOption{{Text: e.BtnText, Data: e.BtnValue}})
+			var row []ButtonOption
+			if len(e.Actions) > 0 {
+				for _, btn := range e.Actions {
+					row = append(row, ButtonOption{Text: btn.Text, Data: btn.Value})
+				}
+			} else {
+				row = append(row, ButtonOption{Text: e.BtnText, Data: e.BtnValue})
+			}
+			if len(row) > 0 {
+				rows = append(rows, row)
+			}
 		}
 	}
 	return rows
