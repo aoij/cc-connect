@@ -10236,60 +10236,57 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	activeSession := sessions.GetOrCreateActive(sessionKey)
 	activeAgentID := activeSession.GetAgentSessionID()
 
-	titleStr := fmt.Sprintf("Codex 线程 · %s (%d)", agentName, total)
+	var titleStr string
 	if totalPages > 1 {
-		titleStr = fmt.Sprintf("Codex 线程 · %s (%d) · 第 %d/%d 页", agentName, total, page, totalPages)
+		titleStr = e.i18n.Tf(MsgCardTitleSessionsPaged, agentName, total, page, totalPages)
+	} else {
+		titleStr = e.i18n.Tf(MsgCardTitleSessions, agentName, total)
 	}
 
-	cb := NewCard().
-		Title(titleStr, "turquoise").
-		Markdown("每一行就是 Codex 左侧的一个会话线程。点 **打开话题** 后，机器人会在群里创建一个同名话题；后续直接在该话题里说话即可继续这个 Codex 上下文。")
-
-	now := time.Now()
+	cb := NewCard().Title(titleStr, "turquoise")
 	for i := start; i < end; i++ {
 		s := agentSessions[i]
-		displayName := e.sessionListDisplayTitle(sessions, &s)
-		rowPrefix := ""
-		statusParts := []string{formatThreadListRelativeTime(s.ModifiedAt, now), fmt.Sprintf("%d 条消息", s.MessageCount)}
-		buttonText := "打开话题"
-		buttonType := "default"
-		if s.ID == activeAgentID {
-			rowPrefix = "🟢 "
-			statusParts = append(statusParts, "当前")
-			buttonText = "继续"
-			buttonType = "primary_filled"
-		}
-		for j := len(statusParts) - 1; j >= 0; j-- {
-			if strings.TrimSpace(statusParts[j]) == "" {
-				statusParts = append(statusParts[:j], statusParts[j+1:]...)
+		displayName := sessions.GetSessionName(s.ID)
+		if displayName != "" {
+			displayName = "📌 " + displayName
+		} else {
+			displayName = strings.ReplaceAll(s.Summary, "\n", " ")
+			displayName = strings.Join(strings.Fields(displayName), " ")
+			if displayName == "" {
+				displayName = e.i18n.T(MsgListEmptySummary)
+			}
+			if len([]rune(displayName)) > 56 {
+				displayName = string([]rune(displayName)[:56]) + "…"
 			}
 		}
-		rowText := fmt.Sprintf(
-			"%s**%s**\n<font color='grey'>%s</font>",
-			rowPrefix, displayName, strings.Join(statusParts, " · "),
-		)
-		cb.ListItemBtnExtra(
-			rowText,
-			buttonText,
-			buttonType,
-			fmt.Sprintf("act:/switch %d", i+1),
-			map[string]string{"action_mode": "switch_session", "session_title": displayName},
-		)
-		if i < end-1 {
-			cb.Divider()
+		btnType := "default"
+		statusLabel := "可切换"
+		if s.ID == activeAgentID {
+			btnType = "primary_filled"
+			statusLabel = "当前会话"
 		}
+		switchExtra := map[string]string{"session_title": displayName}
+		newThreadExtra := map[string]string{"action_mode": "switch_session", "session_title": displayName}
+		if s.ID == activeAgentID {
+			switchExtra["action_mode"] = "switch_current"
+		}
+		rowText := fmt.Sprintf(
+			"**%d. %s**\n<font color='grey'>%s · %d 条消息 · 更新于 %s</font>",
+			i+1, displayName, statusLabel, s.MessageCount, s.ModifiedAt.Format("01-02 15:04"),
+		)
+		cb.ListItemActions(
+			rowText,
+			CardButton{Text: "进入当前", Type: btnType, Value: fmt.Sprintf("act:/switch %d", i+1), Extra: switchExtra},
+			CardButton{Text: "开新话题", Type: "default", Value: fmt.Sprintf("act:/switch %d", i+1), Extra: newThreadExtra},
+			CardButton{Text: "删除", Type: "danger", Value: fmt.Sprintf("act:/delete-one ask %d", i+1)},
+		)
 	}
-
-	var manageBtns []CardButton
-	manageBtns = append(manageBtns, DefaultBtn("刷新", fmt.Sprintf("nav:/list %d", page)))
-	manageBtns = append(manageBtns, DangerBtn("删除管理", "act:/delete-mode"))
-	manageBtns = append(manageBtns, e.cardBackButton())
-	cb.Buttons(manageBtns...)
 
 	var navBtns []CardButton
 	if page > 1 {
 		navBtns = append(navBtns, e.cardPrevButton(fmt.Sprintf("nav:/list %d", page-1)))
 	}
+	navBtns = append(navBtns, e.cardBackButton())
 	if page < totalPages {
 		navBtns = append(navBtns, e.cardNextButton(fmt.Sprintf("nav:/list %d", page+1)))
 	}
@@ -10298,51 +10295,8 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if totalPages > 1 {
 		cb.Note(fmt.Sprintf(e.i18n.T(MsgListPageHint), page, totalPages))
 	}
-	cb.Note("普通群消息不会触发；只有机器人创建的话题内可以免 @ 继续。")
+
 	return cb.Build(), nil
-}
-
-func (e *Engine) sessionListDisplayTitle(sessions *SessionManager, s *AgentSessionInfo) string {
-	if s == nil {
-		return e.i18n.T(MsgListEmptySummary)
-	}
-	displayName := sessions.GetSessionName(s.ID)
-	if displayName == "" {
-		displayName = strings.ReplaceAll(s.Summary, "\n", " ")
-		displayName = strings.Join(strings.Fields(displayName), " ")
-	}
-	if displayName == "" {
-		displayName = e.i18n.T(MsgListEmptySummary)
-	}
-	if len([]rune(displayName)) > 34 {
-		displayName = string([]rune(displayName)[:34]) + "…"
-	}
-	return displayName
-}
-
-func formatThreadListRelativeTime(t, now time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	d := now.Sub(t)
-	if d < 0 {
-		d = 0
-	}
-	switch {
-	case d < time.Minute:
-		return "刚刚"
-	case d < time.Hour:
-		return fmt.Sprintf("%d 分钟前", int(d/time.Minute))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%d 小时前", int(d/time.Hour))
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%d 天前", int(d/(24*time.Hour)))
-	default:
-		return t.Format("01-02 15:04")
-	}
 }
 
 // dirCardTruncPath shortens absolute paths for card list rows.

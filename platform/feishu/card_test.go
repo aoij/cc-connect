@@ -278,8 +278,8 @@ func TestRenderCardMap_ListItemActionsRenderAsCompactSessionCard(t *testing.T) {
 
 	got := decodeRenderedCard(t, card)
 	elements, ok := got["elements"].([]any)
-	if !ok || len(elements) != 3 {
-		t.Fatalf("elements = %#v, want markdown + button row + divider", got["elements"])
+	if !ok || len(elements) != 2 {
+		t.Fatalf("elements = %#v, want markdown + button row", got["elements"])
 	}
 	textRow := elements[0].(map[string]any)
 	if textRow["tag"] != "markdown" {
@@ -292,10 +292,6 @@ func TestRenderCardMap_ListItemActionsRenderAsCompactSessionCard(t *testing.T) {
 	buttonCols := buttonRow["columns"].([]any)
 	if len(buttonCols) != 3 {
 		t.Fatalf("button columns = %d, want 3", len(buttonCols))
-	}
-	divider := elements[2].(map[string]any)
-	if divider["tag"] != "hr" {
-		t.Fatalf("divider tag = %#v, want hr", divider["tag"])
 	}
 	firstCol := buttonCols[0].(map[string]any)
 	firstBtn := firstCol["elements"].([]any)[0].(map[string]any)
