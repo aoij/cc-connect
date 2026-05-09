@@ -2036,6 +2036,37 @@ func TestBuildActionTaskChatTitleUsesCompactStatusFormat(t *testing.T) {
 	}
 }
 
+func TestTaskChatStorePersistsBotCreatedGroups(t *testing.T) {
+	dir := t.TempDir()
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"cc_data_dir":        dir,
+		"cc_project":         "trade_cloud-codex",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.markBotTaskChat("oc_task_chat")
+
+	reloadedAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"cc_data_dir":        dir,
+		"cc_project":         "trade_cloud-codex",
+	})
+	if err != nil {
+		t.Fatalf("New() reload error = %v", err)
+	}
+	reloaded := reloadedAny.(*interactivePlatform)
+	if !reloaded.isBotTaskChat("oc_task_chat") {
+		t.Fatal("expected bot-created task chat marker to survive platform reload")
+	}
+}
+
 func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{

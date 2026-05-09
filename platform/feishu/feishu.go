@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -176,6 +178,7 @@ type Platform struct {
 	rootSessionAliases        map[string]string    // root/parent messageID -> canonical sessionKey, learned from card actions/replies
 	botTaskChatMu             sync.Mutex
 	botTaskChatIDs            map[string]time.Time // chat_id -> created time, allows no-mention replies in bot-created task groups
+	taskChatStorePath         string
 }
 
 type interactivePlatform struct {
@@ -261,6 +264,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard = v
 	}
 	sessionSwitchNewThread, _ := opts["session_switch_new_thread"].(bool)
+	ccDataDir, _ := opts["cc_data_dir"].(string)
+	ccProject, _ := opts["cc_project"].(string)
 
 	// Webhook mode configuration (for Lark international version)
 	port, _ := opts["port"].(string)
@@ -304,7 +309,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
 		peerBots:                   peerBots,
+		botTaskChatIDs:             map[string]time.Time{},
+		taskChatStorePath:          taskChatStorePath(ccDataDir, ccProject, name, appID),
 	}
+	base.loadBotTaskChats()
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
@@ -1182,7 +1190,6 @@ func (p *Platform) markBotTaskChat(chatID string) {
 		return
 	}
 	p.botTaskChatMu.Lock()
-	defer p.botTaskChatMu.Unlock()
 	if p.botTaskChatIDs == nil {
 		p.botTaskChatIDs = make(map[string]time.Time)
 	}
@@ -1193,6 +1200,73 @@ func (p *Platform) markBotTaskChat(chatID string) {
 		}
 	}
 	p.botTaskChatIDs[chatID] = now
+	snapshot := make(map[string]time.Time, len(p.botTaskChatIDs))
+	for id, createdAt := range p.botTaskChatIDs {
+		snapshot[id] = createdAt
+	}
+	storePath := p.taskChatStorePath
+	p.botTaskChatMu.Unlock()
+	p.saveBotTaskChats(storePath, snapshot)
+	return
+}
+
+func (p *Platform) loadBotTaskChats() {
+	if p.taskChatStorePath == "" {
+		return
+	}
+	data, err := os.ReadFile(p.taskChatStorePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Debug(p.tag()+": load task chat store failed", "path", p.taskChatStorePath, "error", err)
+		}
+		return
+	}
+	var raw map[string]int64
+	if err := json.Unmarshal(data, &raw); err != nil {
+		slog.Debug(p.tag()+": parse task chat store failed", "path", p.taskChatStorePath, "error", err)
+		return
+	}
+	now := time.Now()
+	p.botTaskChatMu.Lock()
+	if p.botTaskChatIDs == nil {
+		p.botTaskChatIDs = make(map[string]time.Time)
+	}
+	for chatID, unix := range raw {
+		chatID = strings.TrimSpace(chatID)
+		if chatID == "" || unix <= 0 {
+			continue
+		}
+		createdAt := time.Unix(unix, 0)
+		if now.Sub(createdAt) <= botThreadRootTTL {
+			p.botTaskChatIDs[chatID] = createdAt
+		}
+	}
+	p.botTaskChatMu.Unlock()
+}
+
+func (p *Platform) saveBotTaskChats(storePath string, chats map[string]time.Time) {
+	if storePath == "" {
+		return
+	}
+	raw := make(map[string]int64, len(chats))
+	now := time.Now()
+	for chatID, createdAt := range chats {
+		if chatID != "" && now.Sub(createdAt) <= botThreadRootTTL {
+			raw[chatID] = createdAt.Unix()
+		}
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		slog.Debug(p.tag()+": marshal task chat store failed", "error", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o755); err != nil {
+		slog.Debug(p.tag()+": create task chat store dir failed", "path", storePath, "error", err)
+		return
+	}
+	if err := core.AtomicWriteFile(storePath, data, 0o644); err != nil {
+		slog.Debug(p.tag()+": write task chat store failed", "path", storePath, "error", err)
+	}
 }
 
 func (p *Platform) isBotTaskChat(chatID string) bool {
@@ -1239,6 +1313,46 @@ func (p *Platform) isTaskChatGroup(chatID string) bool {
 func isTaskChatTitle(name string) bool {
 	name = strings.TrimSpace(name)
 	return strings.HasPrefix(name, "[进行中]") || strings.HasPrefix(name, "[已完成]") || strings.HasPrefix(name, "[失败]")
+}
+
+func taskChatStorePath(dataDir, projectName, platformName, appID string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return ""
+	}
+	projectName = sanitizeTaskChatStoreName(projectName)
+	platformName = sanitizeTaskChatStoreName(platformName)
+	appID = sanitizeTaskChatStoreName(appID)
+	parts := []string{projectName, platformName, appID}
+	nameParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			nameParts = append(nameParts, part)
+		}
+	}
+	if len(nameParts) == 0 {
+		nameParts = append(nameParts, "feishu")
+	}
+	return filepath.Join(dataDir, "feishu_task_chats", strings.Join(nameParts, "_")+".json")
+}
+
+func sanitizeTaskChatStoreName(name string) string {
+	name = strings.TrimSpace(name)
+	replacer := strings.NewReplacer(
+		"\\", "_",
+		"/", "_",
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+		" ", "_",
+	)
+	name = replacer.Replace(name)
+	name = strings.Trim(name, "._-")
+	return name
 }
 
 func (p *Platform) markBotThreadRoot(rootID string) {
