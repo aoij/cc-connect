@@ -589,6 +589,129 @@ func TestInteractivePlatform_CardActionNewSessionCreatesTaskChat(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_CardActionThreadSwitchCurrentCreatesTaskChat(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"thread_isolation":   true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	created := make(chan string, 1)
+	ip.createTaskChatHook = func(_ context.Context, userID, title string) (string, error) {
+		if userID != "ou_test_user" {
+			t.Fatalf("userID = %q, want ou_test_user", userID)
+		}
+		created <- title
+		return "oc_task_chat", nil
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":        "act:/switch 1",
+				"action_mode":   "thread_switch_current",
+				"session_title": "lazada一品多仓",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp == nil || resp.Toast == nil {
+		t.Fatalf("expected toast response, got %#v", resp)
+	}
+
+	select {
+	case title := <-created:
+		if title != "[进行中]lazada一品多仓" {
+			t.Fatalf("task chat title = %q, want [进行中]lazada一品多仓", title)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected createTaskChatHook to be called")
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_task_chat:ou_test_user" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_task_chat:ou_test_user", msg.SessionKey)
+		}
+		if msg.Content != "/switch 1" {
+			t.Fatalf("Content = %q, want /switch 1", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card action to dispatch /switch message")
+	}
+}
+
+func TestInteractivePlatform_CardActionCurrentSessionRegistersTaskChatAlias(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"thread_isolation":   true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.createTaskChatHook = func(_ context.Context, userID, title string) (string, error) {
+		return "oc_task_chat", nil
+	}
+	aliasCh := make(chan [2]string, 1)
+	ip.sessionAliasHook = func(aliasSessionKey, targetSessionKey string) {
+		aliasCh <- [2]string{aliasSessionKey, targetSessionKey}
+	}
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	_, err = ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_test_user"},
+			Action: &callback.CallBackAction{Value: map[string]any{
+				"action":        "act:/current",
+				"action_mode":   "thread_current_session",
+				"session_title": "当前会话",
+				"session_key":   "feishu:oc_origin:ou_test_user",
+			}},
+			Context: &callback.Context{OpenChatID: "oc_origin", OpenMessageID: "om_card_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+
+	select {
+	case got := <-aliasCh:
+		if got[0] != "feishu:oc_task_chat:ou_test_user" || got[1] != "feishu:oc_origin:ou_test_user" {
+			t.Fatalf("alias = %#v, want task chat alias to origin session", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected session alias to be registered")
+	}
+	select {
+	case msg := <-msgCh:
+		if msg.Content != "/current" {
+			t.Fatalf("Content = %q, want /current", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card action to dispatch /current message")
+	}
+}
+
 func TestBuildSwitchThreadTitleUsesSessionTitle(t *testing.T) {
 	got := buildSwitchThreadTitle("2", "📌 chatgpt2api 分析下当前项目部署的这个服务")
 	want := "Codex #2｜chatgpt2api 分析下当前项目部署的这个服务"

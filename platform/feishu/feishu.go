@@ -577,6 +577,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			case "thread_switch_current":
 				if sid, _ := event.Event.Action.Value["session_id"].(string); strings.TrimSpace(sid) != "" {
 					cmdToDispatch = "/switch " + strings.TrimSpace(sid)
+				} else if strings.HasPrefix(actionVal, "act:/switch ") {
+					cmdToDispatch = "/" + strings.TrimPrefix(actionVal, "act:/")
 				} else {
 					cmdToDispatch = "/current"
 				}
@@ -596,6 +598,9 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				}, nil
 			}
 			newSessionKey := fmt.Sprintf("%s:%s:%s", p.tag(), newChatID, userID)
+			if actionMode == "thread_current_session" && sessionKey != "" && p.sessionAliasHook != nil {
+				p.sessionAliasHook(newSessionKey, sessionKey)
+			}
 			newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
 			go func() {
 				if cmdToDispatch != "" {

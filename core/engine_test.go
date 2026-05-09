@@ -2993,6 +2993,31 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdCurrent_UsesCardOnCardPlatform(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "lazada一品多仓"
+	session.SetAgentSessionID("session-123", "test")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("replied cards = %d, want 1", len(p.repliedCards))
+	}
+	btn, ok := findCardAction(p.repliedCards[0], "act:/current")
+	if !ok {
+		t.Fatal("expected current card to include enter-task-chat action")
+	}
+	if btn.Extra["action_mode"] != "thread_current_session" {
+		t.Fatalf("current action_mode = %q, want thread_current_session", btn.Extra["action_mode"])
+	}
+	if btn.Extra["session_title"] != "lazada一品多仓" {
+		t.Fatalf("session_title = %q, want lazada一品多仓", btn.Extra["session_title"])
+	}
+}
+
 func TestCmdDelete_BatchCommaList(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
@@ -5063,14 +5088,14 @@ func TestRenderListCard_SessionRowsCarryThreeActions(t *testing.T) {
 	if item.Actions[0].Text != "进入当前" || item.Actions[0].Value != "act:/switch 1" {
 		t.Fatalf("first action = %#v, want enter switch", item.Actions[0])
 	}
-	if item.Actions[0].Extra["action_mode"] == "switch_session" {
-		t.Fatalf("enter action should not create a new thread: %#v", item.Actions[0].Extra)
+	if item.Actions[0].Extra["action_mode"] != "thread_switch_current" {
+		t.Fatalf("enter action_mode = %q, want thread_switch_current", item.Actions[0].Extra["action_mode"])
 	}
-	if item.Actions[1].Text != "开新话题" || item.Actions[1].Value != "act:/switch 1" {
-		t.Fatalf("second action = %#v, want new topic switch", item.Actions[1])
+	if item.Actions[1].Text != "新开线程" || item.Actions[1].Value != "act:/switch 1" {
+		t.Fatalf("second action = %#v, want new thread switch", item.Actions[1])
 	}
-	if item.Actions[1].Extra["action_mode"] != "switch_session" {
-		t.Fatalf("new topic action_mode = %q, want switch_session", item.Actions[1].Extra["action_mode"])
+	if item.Actions[1].Extra["action_mode"] != "thread_switch_session" {
+		t.Fatalf("new thread action_mode = %q, want thread_switch_session", item.Actions[1].Extra["action_mode"])
 	}
 	if item.Actions[1].Extra["session_title"] != "Session one" {
 		t.Fatalf("session_title = %q, want Session one", item.Actions[1].Extra["session_title"])

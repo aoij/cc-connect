@@ -6570,7 +6570,7 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 		return
 	}
 
-	e.reply(p, msg.ReplyCtx, "已进入当前会话，请直接在当前聊天里发送任务。")
+	e.replyWithCard(p, msg.ReplyCtx, e.renderCurrentCard(msg.SessionKey))
 }
 
 func (e *Engine) cmdStatus(p Platform, msg *Message) {
@@ -10724,10 +10724,16 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			btnType = "primary_filled"
 			statusLabel = "当前会话"
 		}
-		switchExtra := map[string]string{"session_title": displayName}
-		newThreadExtra := map[string]string{"action_mode": "switch_session", "session_title": displayName}
+		switchExtra := map[string]string{
+			"action_mode":   "thread_switch_current",
+			"session_title": displayName,
+		}
+		newThreadExtra := map[string]string{
+			"action_mode":   "thread_switch_session",
+			"session_title": displayName,
+		}
 		if s.ID == activeAgentID {
-			switchExtra["action_mode"] = "switch_current"
+			switchExtra["action_mode"] = "thread_switch_current"
 		}
 		if threadTitle := sessionThreadTitle(agentName, i+1, displayName); threadTitle != "" {
 			switchExtra["thread_title"] = threadTitle
@@ -10740,7 +10746,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		cb.ListItemActions(
 			rowText,
 			CardButton{Text: "进入当前", Type: btnType, Value: fmt.Sprintf("act:/switch %d", i+1), Extra: switchExtra},
-			CardButton{Text: "开新话题", Type: "default", Value: fmt.Sprintf("act:/switch %d", i+1), Extra: newThreadExtra},
+			CardButton{Text: "新开线程", Type: "default", Value: fmt.Sprintf("act:/switch %d", i+1), Extra: newThreadExtra},
 			CardButton{Text: "删除", Type: "danger", Value: fmt.Sprintf("act:/delete-one ask %d", i+1)},
 		)
 	}
@@ -10888,10 +10894,28 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
 	content := fmt.Sprintf(e.i18n.T(MsgCurrentSession), s.Name, agentID, len(s.History))
+	sessionTitle := s.Name
+	if sessionTitle == "" || sessionTitle == "default" {
+		sessionTitle = stripTaskTopicStatus(agentID)
+	}
+	if sessionTitle == "" || sessionTitle == e.i18n.T(MsgSessionNotStarted) {
+		sessionTitle = "当前会话"
+	}
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleCurrentSession), "turquoise").
-		Markdown(content).
-		Buttons(e.cardBackButton()).
+		Markdown(content+"\n\n点击下方按钮会创建一个独立任务群，在新群里直接发任务即可。").
+		Buttons(
+			CardButton{Text: "进入任务群", Type: "primary", Value: "act:/current", Extra: map[string]string{
+				"action_mode":   "thread_current_session",
+				"session_title": sessionTitle,
+				"session_name":  sessionTitle,
+			}},
+			CardButton{Text: "新建会话群", Type: "default", Value: "act:/new", Extra: map[string]string{
+				"action_mode":  "thread_new_session",
+				"thread_title": "Codex｜等待任务",
+			}},
+			e.cardBackButton(),
+		).
 		Build()
 }
 
