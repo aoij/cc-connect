@@ -291,27 +291,31 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession           AgentSession
-	platform               Platform
-	replyCtx               any
-	currentMessageID       string
-	workspaceDir           string
-	agent                  Agent
-	mu                     sync.Mutex
-	stopCh                 chan struct{}
-	stopped                bool
-	pending                *pendingPermission
-	pendingMessages        []queuedMessage // messages queued while session was busy
-	approveAll             bool            // when true, auto-approve all permission requests for this session
-	fromVoice              bool            // true if current turn originated from voice transcription
-	sideText               string
-	taskTitle              string
-	topicStatus            string
-	deleteMode             *deleteModeState
-	modelSwitch            *modelSwitchState
-	pendingProviderAdd     *pendingProviderAddState
-	lastAutoCompressAt     time.Time
-	lastAutoCompressTokens int
+	agentSession            AgentSession
+	platform                Platform
+	replyCtx                any
+	currentMessageID        string
+	currentPrompt           string
+	currentImages           []ImageAttachment
+	currentFiles            []FileAttachment
+	resumeRecoveryAttempted bool
+	workspaceDir            string
+	agent                   Agent
+	mu                      sync.Mutex
+	stopCh                  chan struct{}
+	stopped                 bool
+	pending                 *pendingPermission
+	pendingMessages         []queuedMessage // messages queued while session was busy
+	approveAll              bool            // when true, auto-approve all permission requests for this session
+	fromVoice               bool            // true if current turn originated from voice transcription
+	sideText                string
+	taskTitle               string
+	topicStatus             string
+	deleteMode              *deleteModeState
+	modelSwitch             *modelSwitchState
+	pendingProviderAdd      *pendingProviderAddState
+	lastAutoCompressAt      time.Time
+	lastAutoCompressTokens  int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -2738,6 +2742,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
+	state.mu.Lock()
+	state.currentPrompt = promptContent
+	state.currentImages = append([]ImageAttachment(nil), msg.Images...)
+	state.currentFiles = append([]FileAttachment(nil), msg.Files...)
+	state.resumeRecoveryAttempted = false
+	state.mu.Unlock()
 	go func() {
 		sendDone <- state.agentSession.Send(promptContent, msg.Images, msg.Files)
 	}()
@@ -2996,6 +3006,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			slog.Error("session resume failed, falling back to fresh session",
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
+			e.resetStaleAgentSession(session, sessions, agent, startSessionID, sessionKey, err)
 			startAt = time.Now()
 			agentSession, err = agent.StartSession(e.ctx, "")
 			startElapsed = time.Since(startAt)
@@ -3454,6 +3465,131 @@ type agentErrorHandler struct {
 	msgKey   MsgKey
 }
 
+func isRecoverableResumeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "thread/resume") && strings.Contains(msg, "no rollout"):
+		return true
+	case strings.Contains(msg, "thread/resume failed"):
+		return true
+	case strings.Contains(msg, "no rollout found") && strings.Contains(msg, "thread id"):
+		return true
+	case strings.Contains(msg, "session not found") && strings.Contains(msg, "resume"):
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *Engine) resetStaleAgentSession(session *Session, sessions *SessionManager, agent Agent, staleID, sessionKey string, err error) {
+	if session == nil {
+		return
+	}
+	agentName := ""
+	if agent != nil {
+		agentName = agent.Name()
+	}
+	slog.Warn("stale agent session detected; clearing saved session id",
+		"session_key", sessionKey,
+		"stale_agent_session", staleID,
+		"agent", agentName,
+		"error", err)
+	session.SetAgentSessionID("", agentName)
+	if sessions != nil {
+		sessions.Save()
+	}
+}
+
+func (e *Engine) recoverInteractiveResumeFailure(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, err error) bool {
+	if !isRecoverableResumeError(err) || state == nil {
+		return false
+	}
+
+	state.mu.Lock()
+	if state.resumeRecoveryAttempted {
+		state.mu.Unlock()
+		return false
+	}
+	state.resumeRecoveryAttempted = true
+	oldAgentSession := state.agentSession
+	agent := state.agent
+	if agent == nil {
+		agent = e.agent
+	}
+	staleID := ""
+	if oldAgentSession != nil {
+		staleID = strings.TrimSpace(oldAgentSession.CurrentSessionID())
+	}
+	state.agentSession = nil
+	state.eventsNeedResync = true
+	state.mu.Unlock()
+
+	if agent == nil {
+		return false
+	}
+	if staleID == "" && session != nil {
+		staleID = strings.TrimSpace(session.GetAgentSessionID())
+	}
+	e.resetStaleAgentSession(session, sessions, agent, staleID, sessionKey, err)
+
+	if oldAgentSession != nil {
+		e.closeAgentSessionWithTimeout(sessionKey, oldAgentSession)
+	}
+	if state.isStopped() || e.ctx.Err() != nil {
+		return false
+	}
+
+	startAt := time.Now()
+	agentSession, startErr := agent.StartSession(e.ctx, "")
+	startElapsed := time.Since(startAt)
+	if startErr != nil {
+		slog.Error("failed to start fresh session after resume recovery",
+			"session_key", sessionKey, "error", startErr, "elapsed", startElapsed)
+		e.hooks.Emit(HookEvent{
+			Event:      HookEventError,
+			SessionKey: sessionKey,
+			Error:      fmt.Sprintf("failed to recover stale session: %v", startErr),
+		})
+		e.cleanupInteractiveState(sessionKey, state)
+		return false
+	}
+
+	if newID := agentSession.CurrentSessionID(); newID != "" && session != nil {
+		if session.CompareAndSetAgentSessionID(newID, agent.Name()) {
+			if sessions != nil {
+				pendingName := session.GetName()
+				if pendingName != "" && pendingName != "session" && pendingName != "default" {
+					sessions.SetSessionName(newID, pendingName)
+				}
+				sessions.Save()
+			}
+		}
+	}
+
+	state.mu.Lock()
+	state.agentSession = agentSession
+	state.eventsNeedResync = true
+	state.mu.Unlock()
+
+	slog.Info("fresh session started after stale resume error",
+		"session_key", sessionKey,
+		"agent_session", agentSession.CurrentSessionID(),
+		"elapsed", startElapsed)
+	e.hooks.Emit(HookEvent{
+		Event:      HookEventSessionStarted,
+		SessionKey: sessionKey,
+		Extra: map[string]any{
+			"agent_session_id": agentSession.CurrentSessionID(),
+			"is_resume":        false,
+			"recovered_resume": true,
+		},
+	})
+	return true
+}
+
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
 }
@@ -3539,6 +3675,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
+				if e.recoverInteractiveResumeFailure(state, session, sessions, sessionKey, err) {
+					events = state.agentSession.Events()
+					stopCh = state.stopSignal()
+					nextSend := make(chan error, 1)
+					state.mu.Lock()
+					prompt := state.currentPrompt
+					images := append([]ImageAttachment(nil), state.currentImages...)
+					files := append([]FileAttachment(nil), state.currentFiles...)
+					state.mu.Unlock()
+					go func() {
+						nextSend <- state.agentSession.Send(prompt, images, files)
+					}()
+					pendingSend = nextSend
+					continue
+				}
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				sp.discard()
 				if stopTyping != nil {
@@ -4296,6 +4447,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
+				state.mu.Lock()
+				state.currentPrompt = queuedPrompt
+				state.currentImages = append([]ImageAttachment(nil), queued.images...)
+				state.currentFiles = append([]FileAttachment(nil), queued.files...)
+				state.resumeRecoveryAttempted = false
+				state.mu.Unlock()
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -4563,6 +4720,12 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		session.AddHistory("user", queued.content)
 
 		sendDone := make(chan error, 1)
+		state.mu.Lock()
+		state.currentPrompt = prompt
+		state.currentImages = append([]ImageAttachment(nil), queued.images...)
+		state.currentFiles = append([]FileAttachment(nil), queued.files...)
+		state.resumeRecoveryAttempted = false
+		state.mu.Unlock()
 		go func() {
 			sendDone <- state.agentSession.Send(prompt, queued.images, queued.files)
 		}()

@@ -5650,6 +5650,46 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
 }
 func (a *controllableAgent) Stop() error { return nil }
 
+type startRecordingAgent struct {
+	name      string
+	sessions  []AgentSession
+	failFirst error
+	mu        sync.Mutex
+	startIDs  []string
+}
+
+func (a *startRecordingAgent) Name() string {
+	if a.name != "" {
+		return a.name
+	}
+	return "codex"
+}
+func (a *startRecordingAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.startIDs = append(a.startIDs, sessionID)
+	if len(a.startIDs) == 1 && a.failFirst != nil {
+		return nil, a.failFirst
+	}
+	if len(a.sessions) == 0 {
+		return newControllableSession("default"), nil
+	}
+	s := a.sessions[0]
+	a.sessions = a.sessions[1:]
+	return s, nil
+}
+func (a *startRecordingAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+func (a *startRecordingAgent) Stop() error { return nil }
+func (a *startRecordingAgent) IDs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]string, len(a.startIDs))
+	copy(out, a.startIDs)
+	return out
+}
+
 // TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
 // with an expected state pointer is a no-op when the map entry has been replaced.
 // This is the core of the /new race fix: old goroutine's cleanup must not delete
@@ -5936,6 +5976,116 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 // TestStaleGoroutineCleanup_RaceSimulation simulates the full race scenario:
 // old turn still processing → /new creates new Session → new turn starts →
 // old turn exits and calls cleanup. Verifies the new state survives.
+func TestStartSessionResumeFailureClearsStaleIDAndFallsBack(t *testing.T) {
+	fresh := newControllableSession("fresh-start-id")
+	agent := &startRecordingAgent{
+		name:      "codex",
+		sessions:  []AgentSession{fresh},
+		failFirst: fmt.Errorf("thread/resume failed: no rollout found for thread id stale-id"),
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("stale-id", "codex")
+	e.sessions.Save()
+
+	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	if state.agentSession != fresh {
+		t.Fatal("expected fresh session after failed resume")
+	}
+	if got := session.GetAgentSessionID(); got != "fresh-start-id" {
+		t.Fatalf("AgentSessionID = %q, want fresh-start-id", got)
+	}
+	ids := agent.IDs()
+	if len(ids) != 2 || ids[0] != "stale-id" || ids[1] != "" {
+		t.Fatalf("StartSession ids = %#v, want [stale-id, \"\"]", ids)
+	}
+	if _, ok := e.sessions.KnownAgentSessionIDs()["stale-id"]; !ok {
+		t.Fatal("stale id should be preserved in PastAgentSessionIDs")
+	}
+}
+
+type sendFailOnceSession struct {
+	controllableAgentSession
+	err       error
+	sendCalls int
+}
+
+func newSendFailOnceSession(id string, err error) *sendFailOnceSession {
+	return &sendFailOnceSession{
+		controllableAgentSession: controllableAgentSession{
+			sessionID: id,
+			alive:     true,
+			events:    make(chan Event, 8),
+			closed:    make(chan struct{}),
+		},
+		err: err,
+	}
+}
+
+func (s *sendFailOnceSession) Send(_ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.sendCalls++
+	if s.sendCalls == 1 {
+		s.alive = false
+		return s.err
+	}
+	s.events <- Event{Type: EventResult, Content: "recovered", SessionID: s.sessionID, Done: true}
+	return nil
+}
+
+func TestProcessInteractiveEvents_RecoversFromResumeFailureOnSend(t *testing.T) {
+	stale := newSendFailOnceSession("stale-id", fmt.Errorf("thread/resume failed: no rollout found for thread id stale-id"))
+	fresh := newCodexLikeSession("fresh-after-send-failure")
+	agent := &startRecordingAgent{name: "codex", sessions: []AgentSession{stale, fresh}}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("stale-id", "codex")
+	e.sessions.Save()
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{
+			SessionKey: key,
+			Platform:   "test",
+			UserID:     "user1",
+			Content:    "hello after stale resume",
+			ReplyCtx:   "ctx",
+		}, session, agent, e.sessions, key, "", key)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveMessageWith did not recover in time")
+	}
+
+	if got := session.GetAgentSessionID(); got != "fresh-after-send-failure" {
+		t.Fatalf("AgentSessionID = %q, want fresh-after-send-failure", got)
+	}
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(strings.Join(sent, "\n"), "Done") {
+		t.Fatalf("expected recovered response to be sent, got %#v", sent)
+	}
+	ids := agent.IDs()
+	if len(ids) != 2 || ids[0] != "stale-id" || ids[1] != "" {
+		t.Fatalf("StartSession ids = %#v, want [stale-id, \"\"]", ids)
+	}
+	select {
+	case <-stale.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale session was not closed")
+	}
+}
+
 func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	newSess := newControllableSession("new-agent")
