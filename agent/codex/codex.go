@@ -185,10 +185,6 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
-	if models := a.configuredModels(); len(models) > 0 {
-		return prioritizeModelOptions(a.GetModel(), models)
-	}
-
 	a.mu.RLock()
 	codexHome := a.codexHome
 	a.mu.RUnlock()
@@ -197,11 +193,9 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	models = appendUniqueModelOptions(models, readCodexConfigModelOptions(codexHome)...)
 	models = appendUniqueModelOptions(models, a.fetchModelsFromAPI(ctx)...)
 	models = appendUniqueModelOptions(models, readCodexCachedModels(codexHome)...)
-	if len(models) > 0 {
-		return prioritizeModelOptions(a.GetModel(), models)
-	}
-
-	return prioritizeModelOptions(a.GetModel(), defaultCodexModelOptions())
+	models = appendUniqueModelOptions(models, a.configuredModels()...)
+	models = appendUniqueModelOptions(models, defaultCodexModelOptions()...)
+	return prioritizeModelOptions(a.GetModel(), models)
 }
 
 func (a *Agent) effectiveModelAndReasoning() (model string, effort string) {

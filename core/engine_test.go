@@ -7442,6 +7442,33 @@ func TestHandleCardNav_ModelSettingsCardIncludesModelAndCapability(t *testing.T)
 	}
 }
 
+func TestHandleCardNav_ModelSettingsUsesCompactModelLabels(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubStrictModelAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "gpt-5.5", reasoningEffort: "xhigh", mode: "yolo"},
+		models: []ModelOption{
+			{Name: "gpt-5.5", Desc: "cc-switch current: ep"},
+			{Name: "gpt-5.4", Desc: "cc-switch: DGB公益站"},
+			{Name: "gpt-5.3-codex", Desc: "cc-switch migration target with a very long description"},
+		},
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	card := e.handleCardNav("nav:/model-settings", "feishu:channel1:user1")
+	if card == nil {
+		t.Fatal("expected model settings card")
+	}
+	text := card.RenderText()
+	if strings.Contains(text, "gpt-5.3-codex — cc-switch migration target with a very long description") {
+		t.Fatalf("model settings card text = %q, should truncate long select labels", text)
+	}
+	for _, want := range []string{"gpt-5.5 — cc-switch current: ep", "gpt-5.4 — cc-switch: DGB公益站", "gpt-5.3-codex — cc-switch migration target with…"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("model settings card text = %q, want %q", text, want)
+		}
+	}
+}
+
 func TestHandleCardNav_ModelUsesWorkspaceContext(t *testing.T) {
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	globalAgent := &stubModelModeAgent{model: "global-old"}

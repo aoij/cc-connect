@@ -33,6 +33,11 @@ type codexStateThread struct {
 	UpdatedAtMS      int64
 }
 
+type codexSessionIndexEntry struct {
+	ID         string `json:"id"`
+	ThreadName string `json:"thread_name"`
+}
+
 // resolveCodexHomeDir returns the effective CODEX_HOME directory.
 // Priority: explicit config value > CODEX_HOME env > ~/.codex
 func resolveCodexHomeDir(explicit string) string {
@@ -109,6 +114,7 @@ func listCodexAppThreads(workDir, codexHome string) ([]core.AgentSessionInfo, bo
 		return nil, true, fmt.Errorf("open codex state db: %w", err)
 	}
 	defer db.Close()
+	indexNames := loadCodexSessionIndexNames(codexHome)
 	rows, err := db.Query(`
 select id, rollout_path, cwd, title, first_user_message, preview, coalesce(git_branch, ''),
        updated_at, coalesce(updated_at_ms, 0)
@@ -143,6 +149,9 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 		if !fileExists(row.RolloutPath) {
 			continue
 		}
+		if name := strings.TrimSpace(indexNames[row.ID]); name != "" {
+			row.Title = name
+		}
 		sessions = append(sessions, codexThreadToSessionInfo(row))
 	}
 	if err := rows.Err(); err != nil {
@@ -151,36 +160,40 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 	return sessions, true, nil
 }
 
-func loadCodexSidebarThreadIDs(codexHome string) map[string]struct{} {
+func loadCodexSessionIndexNames(codexHome string) map[string]string {
 	home := resolveCodexHomeDir(codexHome)
 	if home == "" {
 		return nil
 	}
-	path := filepath.Join(home, ".codex-global-state.json")
-	data, err := os.ReadFile(path)
+	path := filepath.Join(home, "session_index.jsonl")
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
+	defer f.Close()
 
-	var state struct {
-		Persisted struct {
-			HeartbeatThreadPermissions map[string]json.RawMessage `json:"heartbeat-thread-permissions-by-id"`
-		} `json:"electron-persisted-atom-state"`
-	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil
-	}
-	if len(state.Persisted.HeartbeatThreadPermissions) == 0 {
-		return nil
-	}
-	ids := make(map[string]struct{}, len(state.Persisted.HeartbeatThreadPermissions))
-	for id := range state.Persisted.HeartbeatThreadPermissions {
-		id = strings.TrimSpace(id)
-		if id != "" {
-			ids[id] = struct{}{}
+	names := make(map[string]string)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var entry codexSessionIndexEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		id := strings.TrimSpace(entry.ID)
+		name := strings.TrimSpace(entry.ThreadName)
+		if id != "" && name != "" {
+			names[id] = name
 		}
 	}
-	return ids
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }
 
 func codexThreadToSessionInfo(row codexStateThread) core.AgentSessionInfo {

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,6 +114,32 @@ func TestListCodexSessions_DoesNotFilterByHeartbeatPermissions(t *testing.T) {
 	}
 	if got[0].ID != "session-hidden" || got[1].ID != "session-visible" {
 		t.Fatalf("listCodexSessions() = %#v, want all state DB threads ordered by updated time", got)
+	}
+}
+
+func TestListCodexSessions_UsesSessionIndexThreadName(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rollout := writeTestRollout(t, codexHome, "session-indexed", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-indexed", rollout, workDir, "long original first prompt title", 0, 2000, "")
+	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-indexed", ThreadName: "短标题"})
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listCodexSessions() len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].Summary != "短标题" {
+		t.Fatalf("Summary = %q, want session_index thread_name", got[0].Summary)
 	}
 }
 
@@ -230,6 +257,21 @@ func writeTestGlobalState(t *testing.T, codexHome string, ids ...string) {
 	}
 	content := `{"electron-persisted-atom-state":{"heartbeat-thread-permissions-by-id":{` + entries + `}}}`
 	if err := os.WriteFile(filepath.Join(codexHome, ".codex-global-state.json"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestSessionIndex(t *testing.T, codexHome string, entries ...codexSessionIndexEntry) {
+	t.Helper()
+	var content string
+	for _, entry := range entries {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content += string(data) + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "session_index.jsonl"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

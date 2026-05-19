@@ -34,10 +34,13 @@ func TestAvailableModels_FallbackToModelsCache(t *testing.T) {
 
 	a := &Agent{activeIdx: -1}
 	models := a.AvailableModels(context.Background())
-	if len(models) != 2 {
-		t.Fatalf("models length = %d, want 2, models=%v", len(models), models)
+	if len(models) < 5 {
+		t.Fatalf("models length = %d, want cache + built-in Codex models, models=%v", len(models), models)
 	}
 	if models[0].Name != "gpt-5.4" || models[1].Name != "gpt-5.3-codex" {
-		t.Fatalf("models = %v, want [gpt-5.4 gpt-5.3-codex]", models)
+		t.Fatalf("models = %v, want cache models first [gpt-5.4 gpt-5.3-codex]", models)
+	}
+	if !hasModelOption(models, "gpt-5.4-mini") || !hasModelOption(models, "gpt-5.2") {
+		t.Fatalf("models = %v, want built-in Codex model choices merged", models)
 	}
 }

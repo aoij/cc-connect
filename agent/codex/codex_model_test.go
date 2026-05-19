@@ -117,6 +117,29 @@ func TestAvailableModels_IncludesCCSwitchAndCodexConfigModels(t *testing.T) {
 	if !hasModelOption(models, "gpt-5.4") {
 		t.Fatalf("models = %v, want gpt-5.4 from Codex config/other provider", models)
 	}
+	if !hasModelOption(models, "gpt-5.4-mini") || !hasModelOption(models, "gpt-5.3-codex") {
+		t.Fatalf("models = %v, want Codex built-in model choices", models)
+	}
+}
+
+func TestAvailableModels_MergesConfiguredAndCodexDefaults(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	a := &Agent{
+		model: "gpt-5.5",
+		providers: []core.ProviderConfig{{
+			Models: []core.ModelOption{{Name: "provider-only-model", Desc: "custom"}},
+		}},
+		activeIdx: 0,
+	}
+
+	models := a.AvailableModels(context.Background())
+	if !hasModelOption(models, "provider-only-model") {
+		t.Fatalf("models = %v, want configured provider model", models)
+	}
+	if !hasModelOption(models, "gpt-5.4") || !hasModelOption(models, "gpt-5.3-codex") {
+		t.Fatalf("models = %v, want Codex default models merged with provider models", models)
+	}
 }
 
 func TestParseCodexRuntimeConfigMap_UsesProviderSectionKeyWhenProviderNameDiffers(t *testing.T) {

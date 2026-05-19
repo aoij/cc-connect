@@ -10925,6 +10925,29 @@ func (e *Engine) renderLangCard() *Card {
 		Build()
 }
 
+func modelSelectLabel(m ModelOption, maxRunes int) string {
+	label := strings.TrimSpace(m.Name)
+	alias := strings.TrimSpace(m.Alias)
+	desc := strings.TrimSpace(m.Desc)
+	if alias != "" {
+		label = alias
+	}
+	if desc != "" {
+		label += " — " + desc
+	}
+	if maxRunes <= 0 {
+		return label
+	}
+	runes := []rune(label)
+	if len(runes) <= maxRunes {
+		return label
+	}
+	if maxRunes <= 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
 func (e *Engine) renderModelCard(sessionKey string) *Card {
 	if ms := e.getModelSwitchState(sessionKey); ms != nil && ms.phase == "switching" {
 		return e.renderModelSwitchingCard(ms.target)
@@ -10955,12 +10978,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 	var opts []CardSelectOption
 	initVal := ""
 	for i, m := range models {
-		label := m.Name
-		if m.Alias != "" {
-			label = m.Alias + " - " + m.Name
-		} else if m.Desc != "" {
-			label += " — " + m.Desc
-		}
+		label := modelSelectLabel(m, 48)
 		val := fmt.Sprintf("act:/model switch %d", i+1)
 		opts = append(opts, CardSelectOption{Text: label, Value: val})
 		if m.Name == current {
@@ -11041,12 +11059,7 @@ func (e *Engine) renderModelSettingsCard(sessionKey string) *Card {
 		models := switcher.AvailableModels(fetchCtx)
 		cancel()
 		for i, m := range models {
-			label := m.Name
-			if m.Alias != "" {
-				label = m.Alias + " - " + m.Name
-			} else if m.Desc != "" {
-				label += " — " + m.Desc
-			}
+			label := modelSelectLabel(m, 48)
 			val := fmt.Sprintf("act:/model switch %d", i+1)
 			modelOpts = append(modelOpts, CardSelectOption{Text: label, Value: val})
 			if m.Name == switcher.GetModel() {
