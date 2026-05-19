@@ -228,14 +228,11 @@ func (a *Agent) effectiveModelAndReasoning() (model string, effort string) {
 
 func defaultCodexModelOptions() []core.ModelOption {
 	return []core.ModelOption{
-		{Name: "gpt-5.5", Desc: "GPT-5.5 (frontier)"},
-		{Name: "gpt-5.4", Desc: "GPT-5.4 (balanced)"},
-		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast)"},
-		{Name: "gpt-5.3-codex", Desc: "GPT-5.3 Codex (code-optimized)"},
+		{Name: "gpt-5.5", Desc: "GPT-5.5"},
+		{Name: "gpt-5.4", Desc: "GPT-5.4"},
+		{Name: "gpt-5.4-mini", Desc: "GPT-5.4-Mini"},
+		{Name: "gpt-5.3-codex", Desc: "GPT-5.3-Codex"},
 		{Name: "gpt-5.2", Desc: "GPT-5.2"},
-		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
-		{Name: "o3", Desc: "O3 (reasoning)"},
-		{Name: "codex-mini-latest", Desc: "Codex Mini (code-optimized)"},
 	}
 }
 

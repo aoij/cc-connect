@@ -79,22 +79,18 @@ func readCodexConfigModelOptions(codexHome string) []core.ModelOption {
 		}
 	}
 	if strings.TrimSpace(current.Model) != "" {
-		desc := "cc-switch current"
-		if current.ProviderName != "" {
-			desc += ": " + current.ProviderName
-		}
-		models = appendUniqueModelOptions(models, core.ModelOption{Name: strings.TrimSpace(current.Model), Desc: desc})
+		models = appendUniqueModelOptions(models, core.ModelOption{Name: strings.TrimSpace(current.Model)})
 	}
 	for _, target := range current.MigrationTargets {
-		models = appendUniqueModelOptions(models, core.ModelOption{Name: target, Desc: "Codex migration target"})
+		models = appendUniqueModelOptions(models, core.ModelOption{Name: target})
 	}
 
 	local := readCodexConfigRuntime(codexHome)
 	if strings.TrimSpace(local.Model) != "" {
-		models = appendUniqueModelOptions(models, core.ModelOption{Name: strings.TrimSpace(local.Model), Desc: "Codex config"})
+		models = appendUniqueModelOptions(models, core.ModelOption{Name: strings.TrimSpace(local.Model)})
 	}
 	for _, target := range local.MigrationTargets {
-		models = appendUniqueModelOptions(models, core.ModelOption{Name: target, Desc: "Codex migration target"})
+		models = appendUniqueModelOptions(models, core.ModelOption{Name: target})
 	}
 	return models
 }

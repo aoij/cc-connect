@@ -10926,14 +10926,12 @@ func (e *Engine) renderLangCard() *Card {
 }
 
 func modelSelectLabel(m ModelOption, maxRunes int) string {
-	label := strings.TrimSpace(m.Name)
-	alias := strings.TrimSpace(m.Alias)
-	desc := strings.TrimSpace(m.Desc)
-	if alias != "" {
-		label = alias
+	label := strings.TrimSpace(m.Alias)
+	if label == "" {
+		label = codexStyleModelLabel(m.Name)
 	}
-	if desc != "" {
-		label += " — " + desc
+	if label == "" {
+		label = strings.TrimSpace(m.Name)
 	}
 	if maxRunes <= 0 {
 		return label
@@ -10946,6 +10944,23 @@ func modelSelectLabel(m ModelOption, maxRunes int) string {
 		return "…"
 	}
 	return string(runes[:maxRunes-1]) + "…"
+}
+
+func codexStyleModelLabel(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "gpt-5.5":
+		return "GPT-5.5"
+	case "gpt-5.4":
+		return "GPT-5.4"
+	case "gpt-5.4-mini":
+		return "GPT-5.4-Mini"
+	case "gpt-5.3-codex":
+		return "GPT-5.3-Codex"
+	case "gpt-5.2":
+		return "GPT-5.2"
+	default:
+		return strings.TrimSpace(name)
+	}
 }
 
 func (e *Engine) renderModelCard(sessionKey string) *Card {

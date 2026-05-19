@@ -7459,10 +7459,12 @@ func TestHandleCardNav_ModelSettingsUsesCompactModelLabels(t *testing.T) {
 		t.Fatal("expected model settings card")
 	}
 	text := card.RenderText()
-	if strings.Contains(text, "gpt-5.3-codex — cc-switch migration target with a very long description") {
-		t.Fatalf("model settings card text = %q, should truncate long select labels", text)
+	for _, forbidden := range []string{"cc-switch current", "DGB公益站", "migration target"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("model settings card text = %q, should hide provider/description noise %q", text, forbidden)
+		}
 	}
-	for _, want := range []string{"gpt-5.5 — cc-switch current: ep", "gpt-5.4 — cc-switch: DGB公益站", "gpt-5.3-codex — cc-switch migration target with…"} {
+	for _, want := range []string{"GPT-5.5", "GPT-5.4", "GPT-5.3-Codex"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("model settings card text = %q, want %q", text, want)
 		}
