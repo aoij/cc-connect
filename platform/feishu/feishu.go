@@ -4340,13 +4340,12 @@ func (p *Platform) ListActiveSessionChats(_ context.Context) ([]core.ActiveSessi
 		if title == "" {
 			title = p.resolveChatName(chatID)
 		}
-		if taskChatStatusFromTitle(title) != "进行中" {
-			continue
-		}
+		status := taskChatStatusFromTitle(title)
 		items = append(items, core.ActiveSessionChatInfo{
 			SessionID: sid,
 			ChatID:    chatID,
 			Title:     title,
+			Status:    status,
 			UpdatedAt: createdAt,
 		})
 	}

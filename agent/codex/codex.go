@@ -447,6 +447,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
+	extraEnv = upsertEnv(extraEnv, "GIT_TERMINAL_PROMPT", "0")
+	extraEnv = upsertEnv(extraEnv, "GCM_INTERACTIVE", "never")
 
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }

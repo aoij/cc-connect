@@ -139,9 +139,25 @@ func parseCodexRuntimeConfigMap(raw map[string]any) codexRuntimeDefaults {
 		}
 		if providerName != "" {
 			if provider := mapValue(providers[providerName]); len(provider) > 0 {
+				cfg.ModelProvider = providerName
 				cfg.BaseURL = strings.TrimSpace(anyStringValue(provider["base_url"]))
 				cfg.WireAPI = strings.TrimSpace(anyStringValue(provider["wire_api"]))
 				cfg.HTTPHeaders = stringMapValue(provider["http_headers"])
+			} else {
+				for name, rawProvider := range providers {
+					provider := mapValue(rawProvider)
+					if len(provider) == 0 {
+						continue
+					}
+					if providerName != strings.TrimSpace(anyStringValue(provider["name"])) {
+						continue
+					}
+					cfg.ModelProvider = name
+					cfg.BaseURL = strings.TrimSpace(anyStringValue(provider["base_url"]))
+					cfg.WireAPI = strings.TrimSpace(anyStringValue(provider["wire_api"]))
+					cfg.HTTPHeaders = stringMapValue(provider["http_headers"])
+					break
+				}
 			}
 		}
 	}
@@ -191,6 +207,7 @@ func parseCodexRuntimeConfigLines(cfgStr string) codexRuntimeDefaults {
 		case strings.HasPrefix(section, "model_providers."):
 			providerName := strings.TrimPrefix(section, "model_providers.")
 			if cfg.ModelProvider == "" || providerName == cfg.ModelProvider {
+				cfg.ModelProvider = providerName
 				switch key {
 				case "base_url":
 					cfg.BaseURL = value

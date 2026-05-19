@@ -7710,6 +7710,7 @@ type activeTaskItem struct {
 	chatName     string
 	currentInput string
 	workspaceDir string
+	status       string
 	queueDepth   int
 	busy         bool
 	updatedAt    time.Time
@@ -7726,6 +7727,26 @@ func activeTaskDisplayName(item activeTaskItem) string {
 		return name
 	}
 	return ""
+}
+
+func activeTaskStatusRank(item activeTaskItem) int {
+	status := strings.TrimSpace(item.status)
+	if item.busy || status == "进行中" {
+		return 0
+	}
+	if item.queueDepth > 0 {
+		return 1
+	}
+	switch status {
+	case "":
+		return 2
+	case "失败":
+		return 3
+	case "已完成":
+		return 4
+	default:
+		return 2
+	}
 }
 
 func activeTaskInputDisplayName(input string) string {
@@ -7899,6 +7920,7 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 				name:      sessionName,
 				taskTitle: strings.TrimSpace(chat.Title),
 				chatName:  strings.TrimSpace(chat.Title),
+				status:    strings.TrimSpace(chat.Status),
 				updatedAt: updatedAt,
 				active:    sessionID == activeID,
 			})
@@ -7906,6 +7928,9 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 	}
 
 	sort.Slice(items, func(i, j int) bool {
+		if ri, rj := activeTaskStatusRank(items[i]), activeTaskStatusRank(items[j]); ri != rj {
+			return ri < rj
+		}
 		if items[i].busy != items[j].busy {
 			return items[i].busy
 		}
@@ -7926,7 +7951,7 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 		return cb.Build()
 	}
 
-	cb.Markdown(fmt.Sprintf("当前聊天 `%s` 下共找到 **%d** 个未完成/执行中的会话。", sessionUserKey, len(items)))
+	cb.Markdown(fmt.Sprintf("当前聊天 `%s` 下共找到 **%d** 个未关闭任务群/会话。", sessionUserKey, len(items)))
 	for idx, item := range items {
 		name := activeTaskDisplayName(item)
 		if name == "" {
@@ -7938,6 +7963,9 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 		}
 		if item.busy {
 			statusParts = append(statusParts, "执行中")
+		}
+		if item.status != "" && !stringSliceContains(statusParts, item.status) {
+			statusParts = append(statusParts, item.status)
 		}
 		if item.queueDepth > 0 {
 			statusParts = append(statusParts, fmt.Sprintf("排队 %d", item.queueDepth))

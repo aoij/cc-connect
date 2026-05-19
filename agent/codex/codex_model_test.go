@@ -119,6 +119,27 @@ func TestAvailableModels_IncludesCCSwitchAndCodexConfigModels(t *testing.T) {
 	}
 }
 
+func TestParseCodexRuntimeConfigMap_UsesProviderSectionKeyWhenProviderNameDiffers(t *testing.T) {
+	cfg := parseCodexRuntimeConfigString(`model_provider = "cch"
+model = "gpt-5.5"
+
+[model_providers.codex_local_access]
+name = "cch"
+base_url = "https://cch.example.test/v1"
+wire_api = "responses"
+`)
+
+	if cfg.ModelProvider != "codex_local_access" {
+		t.Fatalf("ModelProvider = %q, want section key codex_local_access", cfg.ModelProvider)
+	}
+	if cfg.BaseURL != "https://cch.example.test/v1" {
+		t.Fatalf("BaseURL = %q, want provider base_url", cfg.BaseURL)
+	}
+	if cfg.WireAPI != "responses" {
+		t.Fatalf("WireAPI = %q, want responses", cfg.WireAPI)
+	}
+}
+
 func writeTestCodexConfig(t *testing.T, codexHome, model, effort string) {
 	t.Helper()
 	if err := os.MkdirAll(codexHome, 0o755); err != nil {

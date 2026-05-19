@@ -221,6 +221,7 @@ type ActiveSessionChatInfo struct {
 	SessionID string
 	ChatID    string
 	Title     string
+	Status    string
 	UpdatedAt time.Time
 }
 
