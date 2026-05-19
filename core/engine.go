@@ -285,6 +285,7 @@ type queuedMessage struct {
 	fromVoice     bool
 	userID        string
 	userName      string // sender's display name for sender injection
+	chatName      string // human-readable chat/group name
 	msgPlatform   string // platform name for sender injection
 	msgSessionKey string // session key for extracting chat ID
 }
@@ -296,10 +297,12 @@ type interactiveState struct {
 	replyCtx                any
 	currentMessageID        string
 	currentPrompt           string
+	currentUserContent      string
 	currentImages           []ImageAttachment
 	currentFiles            []FileAttachment
 	resumeRecoveryAttempted bool
 	workspaceDir            string
+	chatName                string
 	agent                   Agent
 	mu                      sync.Mutex
 	stopCh                  chan struct{}
@@ -2226,6 +2229,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		fromVoice:     msg.FromVoice,
 		userID:        msg.UserID,
 		userName:      msg.UserName,
+		chatName:      msg.ChatName,
 		msgPlatform:   msg.Platform,
 		msgSessionKey: msg.SessionKey,
 	})
@@ -2856,6 +2860,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.chatName = msg.ChatName
 	state.mu.Unlock()
 	seedTaskTopicStateFromChatName(state, msg.ChatName)
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -2933,6 +2938,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendDone := make(chan error, 1)
 	state.mu.Lock()
 	state.currentPrompt = promptContent
+	state.currentUserContent = msg.Content
 	state.currentImages = append([]ImageAttachment(nil), msg.Images...)
 	state.currentFiles = append([]FileAttachment(nil), msg.Files...)
 	state.resumeRecoveryAttempted = false
@@ -4653,6 +4659,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey)
 				state.mu.Lock()
 				state.currentPrompt = queuedPrompt
+				state.currentUserContent = queued.content
+				state.chatName = queued.chatName
 				state.currentImages = append([]ImageAttachment(nil), queued.images...)
 				state.currentFiles = append([]FileAttachment(nil), queued.files...)
 				state.resumeRecoveryAttempted = false
@@ -4928,6 +4936,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
+		state.chatName = queued.chatName
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
@@ -4946,6 +4955,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		sendDone := make(chan error, 1)
 		state.mu.Lock()
 		state.currentPrompt = prompt
+		state.currentUserContent = queued.content
 		state.currentImages = append([]ImageAttachment(nil), queued.images...)
 		state.currentFiles = append([]FileAttachment(nil), queued.files...)
 		state.resumeRecoveryAttempted = false
@@ -7663,6 +7673,7 @@ func (e *Engine) renderHelpGroupCard(groupKey string) *Card {
 		)
 		cb.ButtonsEqual(
 			DefaultBtn("处理中任务", "nav:/tasks"),
+			DefaultBtn("模型/能力设置", "nav:/model-settings"),
 		)
 		cb.Divider()
 	}
@@ -7695,11 +7706,72 @@ type activeTaskItem struct {
 	sessionID    string
 	agentID      string
 	name         string
+	taskTitle    string
+	chatName     string
+	currentInput string
 	workspaceDir string
 	queueDepth   int
 	busy         bool
 	updatedAt    time.Time
 	active       bool
+}
+
+func activeTaskDisplayName(item activeTaskItem) string {
+	for _, candidate := range []string{item.name, item.taskTitle, item.chatName} {
+		if name := cleanActiveTaskDisplayName(candidate); name != "" {
+			return name
+		}
+	}
+	if name := activeTaskInputDisplayName(item.currentInput); name != "" {
+		return name
+	}
+	return ""
+}
+
+func activeTaskInputDisplayName(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	if strings.HasPrefix(input, "/") {
+		fields := strings.Fields(input)
+		if len(fields) <= 1 {
+			return ""
+		}
+		cmd := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+		switch cmd {
+		case "new", "switch", "current":
+			input = strings.TrimSpace(strings.Join(fields[1:], " "))
+		default:
+			return ""
+		}
+	}
+	return cleanActiveTaskDisplayName(input)
+}
+
+func cleanActiveTaskDisplayName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimPrefix(name, "📌 ")
+	name = stripTaskTopicStatus(name)
+	name = AbbreviateTaskTitle(name, 24)
+	if isGenericActiveTaskDisplayName(name) {
+		return ""
+	}
+	return name
+}
+
+func isGenericActiveTaskDisplayName(name string) bool {
+	name = strings.TrimSpace(stripTaskTopicStatus(name))
+	lower := strings.ToLower(name)
+	switch lower {
+	case "", "default", "session", "new session", "current session", "untitled", "unnamed":
+		return true
+	}
+	switch name {
+	case "默认", "默认会话", "未命名", "未命名会话":
+		return true
+	}
+	return isGenericTaskTopicBase(name)
 }
 
 func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
@@ -7734,6 +7806,9 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 		state.mu.Lock()
 		agentSession := state.agentSession
 		workspaceDir := state.workspaceDir
+		taskTitle := state.taskTitle
+		chatName := state.chatName
+		currentInput := state.currentUserContent
 		queueDepth := len(state.pendingMessages)
 		stopped := state.stopped
 		state.mu.Unlock()
@@ -7765,6 +7840,9 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 			sessionID:    sessionID,
 			agentID:      agentID,
 			name:         strings.TrimSpace(sess.GetName()),
+			taskTitle:    strings.TrimSpace(taskTitle),
+			chatName:     strings.TrimSpace(chatName),
+			currentInput: strings.TrimSpace(currentInput),
 			workspaceDir: strings.TrimSpace(workspaceDir),
 			queueDepth:   queueDepth,
 			busy:         sess.Busy(),
@@ -7796,7 +7874,7 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 
 	cb.Markdown(fmt.Sprintf("当前聊天 `%s` 下共找到 **%d** 个未完成/执行中的会话。", sessionUserKey, len(items)))
 	for idx, item := range items {
-		name := item.name
+		name := activeTaskDisplayName(item)
 		if name == "" {
 			name = "未命名会话"
 		}
@@ -9794,8 +9872,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHelpGroupCard(args)
 	case "/model":
 		return e.renderModelCard(sessionKey)
+	case "/model-settings":
+		return e.renderModelSettingsCard(sessionKey)
 	case "/reasoning":
-		return e.renderReasoningCard()
+		return e.renderReasoningCard(sessionKey)
 	case "/mode":
 		return e.renderModeCard()
 	case "/lang":
@@ -9943,7 +10023,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		switcher, ok := agent.(ReasoningEffortSwitcher)
 		if !ok {
 			return
 		}
@@ -9957,10 +10038,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				switcher.SetReasoningEffort(target)
 				interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 				e.cleanupInteractiveState(interactiveKey)
-				s := e.sessions.GetOrCreateActive(sessionKey)
+				s := sessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
 				s.ClearHistory()
-				e.sessions.Save()
+				sessions.Save()
 				return
 			}
 		}
@@ -10835,8 +10916,110 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 		Build()
 }
 
-func (e *Engine) renderReasoningCard() *Card {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+func (e *Engine) renderModelSettingsCard(sessionKey string) *Card {
+	agent := e.agent
+	if sessionKey != "" {
+		agent, _ = e.sessionContextForKey(sessionKey)
+	}
+	zhLike := e.i18n.IsZhLike()
+
+	title := "Model & Capability Settings"
+	modelLabel := "Model"
+	reasoningLabel := "Capability / reasoning effort"
+	modeLabel := "Permission mode"
+	defaultText := "(default)"
+	notSupported := "Not supported"
+	modelPlaceholder := e.i18n.T(MsgModelSelectPlaceholder)
+	reasoningPlaceholder := e.i18n.T(MsgReasoningSelectPlaceholder)
+	modelButton := "Switch model"
+	reasoningButton := "Adjust capability"
+	modeButton := "Permission mode"
+	if zhLike {
+		title = "模型/能力设置"
+		modelLabel = "模型"
+		reasoningLabel = "模型能力 / 推理强度"
+		modeLabel = "执行权限"
+		defaultText = "默认"
+		notSupported = "不支持"
+		modelButton = "切换模型"
+		reasoningButton = "调整能力"
+		modeButton = "权限模式"
+	}
+
+	var md strings.Builder
+	var modelOpts []CardSelectOption
+	modelInit := ""
+	if switcher, ok := agent.(ModelSwitcher); ok {
+		current := strings.TrimSpace(switcher.GetModel())
+		if current == "" {
+			current = defaultText
+		}
+		fmt.Fprintf(&md, "**%s**：`%s`\n", modelLabel, current)
+		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+		models := switcher.AvailableModels(fetchCtx)
+		cancel()
+		for i, m := range models {
+			label := m.Name
+			if m.Alias != "" {
+				label = m.Alias + " - " + m.Name
+			} else if m.Desc != "" {
+				label += " — " + m.Desc
+			}
+			val := fmt.Sprintf("act:/model switch %d", i+1)
+			modelOpts = append(modelOpts, CardSelectOption{Text: label, Value: val})
+			if m.Name == switcher.GetModel() {
+				modelInit = val
+			}
+		}
+	} else {
+		fmt.Fprintf(&md, "**%s**：%s\n", modelLabel, notSupported)
+	}
+
+	var reasoningOpts []CardSelectOption
+	reasoningInit := ""
+	if switcher, ok := agent.(ReasoningEffortSwitcher); ok {
+		current := strings.TrimSpace(switcher.GetReasoningEffort())
+		if current == "" {
+			current = defaultText
+		}
+		fmt.Fprintf(&md, "**%s**：`%s`\n", reasoningLabel, current)
+		for i, effort := range switcher.AvailableReasoningEfforts() {
+			val := fmt.Sprintf("act:/reasoning %d", i+1)
+			reasoningOpts = append(reasoningOpts, CardSelectOption{Text: effort, Value: val})
+			if effort == switcher.GetReasoningEffort() {
+				reasoningInit = val
+			}
+		}
+	} else {
+		fmt.Fprintf(&md, "**%s**：%s\n", reasoningLabel, notSupported)
+	}
+
+	if switcher, ok := agent.(ModeSwitcher); ok {
+		fmt.Fprintf(&md, "**%s**：`%s`\n", modeLabel, switcher.GetMode())
+	}
+
+	cb := NewCard().Title(title, "indigo").Markdown(md.String())
+	if len(modelOpts) > 0 {
+		cb.Select(modelPlaceholder, modelOpts, modelInit)
+	}
+	if len(reasoningOpts) > 0 {
+		cb.Select(reasoningPlaceholder, reasoningOpts, reasoningInit)
+	}
+	cb.ButtonsEqual(
+		DefaultBtn(modelButton, "nav:/model"),
+		DefaultBtn(reasoningButton, "nav:/reasoning"),
+		DefaultBtn(modeButton, "nav:/mode"),
+	)
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
+}
+
+func (e *Engine) renderReasoningCard(sessionKeys ...string) *Card {
+	agent := e.agent
+	if len(sessionKeys) > 0 && strings.TrimSpace(sessionKeys[0]) != "" {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
 	}

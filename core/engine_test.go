@@ -5261,6 +5261,9 @@ func TestRenderHelpCard_DefaultsToSessionTab(t *testing.T) {
 	if _, ok := findCardAction(card, "nav:/tasks"); !ok {
 		t.Fatal("expected help card to include active tasks entry")
 	}
+	if _, ok := findCardAction(card, "nav:/model-settings"); !ok {
+		t.Fatal("expected help card to include model settings entry")
+	}
 	if btn, ok := findCardAction(card, "act:/new"); !ok {
 		t.Fatal("expected new-session action")
 	} else if btn.Extra["action_mode"] != "thread_new_session" {
@@ -5289,6 +5292,33 @@ func TestHandleCardNav_ActiveTasksEmpty(t *testing.T) {
 	}
 	if _, ok := findCardAction(card, "nav:/tasks"); !ok {
 		t.Fatal("expected refresh action on tasks card")
+	}
+}
+
+func TestHandleCardNav_ActiveTasksUsesTaskTitle(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangChinese)
+	sessionKey := "feishu:oc_task"
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	s.SetAgentInfo("agent-task-1", "codex", "default")
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[e.interactiveKeyForSessionKey(sessionKey)] = &interactiveState{
+		agentSession: newControllableSession("agent-task-1"),
+		taskTitle:    "⏳[进行中]lazada一品多仓",
+		chatName:     "⏳[进行中]lazada一品多仓",
+	}
+	e.interactiveMu.Unlock()
+
+	card := e.handleCardNav("nav:/tasks", sessionKey)
+	if card == nil {
+		t.Fatal("expected active tasks card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "lazada一品多仓") {
+		t.Fatalf("tasks card text = %q, want task title", text)
+	}
+	if strings.Contains(text, "**1. default**") {
+		t.Fatalf("tasks card text = %q, should not show generic default name", text)
 	}
 }
 
@@ -7346,6 +7376,35 @@ func TestHandleCardNav_ModelSwitchesAndRefreshesCard(t *testing.T) {
 	}
 	if refreshed := p.getRefreshedCards(); len(refreshed) != 0 {
 		t.Fatalf("unexpected async refreshed cards: %d", len(refreshed))
+	}
+}
+
+func TestHandleCardNav_ModelSettingsCardIncludesModelAndCapability(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{model: "gpt-5.4", reasoningEffort: "high", mode: "yolo"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	card := e.handleCardNav("nav:/model-settings", "feishu:channel1:user1")
+	if card == nil {
+		t.Fatal("expected model settings card")
+	}
+	text := card.RenderText()
+	for _, want := range []string{
+		"Model & Capability Settings",
+		"gpt-5.4",
+		"high",
+		"yolo",
+		"Select model",
+		"Select reasoning level",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("model settings card text = %q, want %q", text, want)
+		}
+	}
+	for _, action := range []string{"nav:/model", "nav:/reasoning", "nav:/mode"} {
+		if _, ok := findCardAction(card, action); !ok {
+			t.Fatalf("expected model settings action %s", action)
+		}
 	}
 }
 
