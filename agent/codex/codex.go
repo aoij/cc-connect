@@ -28,19 +28,21 @@ func init() {
 //   - "full-auto": --full-auto (sandbox-protected auto execution)
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
-	cliBin          string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cli_path after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
-	sessionEnv      []string
-	mu              sync.RWMutex
+	workDir          string
+	model            string
+	reasoningEffort  string
+	mode             string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend          string // "exec" | "app_server"
+	appServerURL     string
+	codexHome        string
+	cliBin           string   // CLI binary name, default "codex"
+	cliExtraArgs     []string // extra args parsed from cli_path after the binary
+	providers        []core.ProviderConfig
+	activeIdx        int // -1 = no provider set
+	sessionEnv       []string
+	modelOverridden  bool
+	effortOverridden bool
+	mu               sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -150,26 +152,26 @@ func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	a.modelOverridden = true
 	slog.Info("codex: model changed", "model", model)
 }
 
 func (a *Agent) GetModel() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+	model, _ := a.effectiveModelAndReasoning()
+	return model
 }
 
 func (a *Agent) SetReasoningEffort(effort string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.reasoningEffort = normalizeReasoningEffort(effort)
+	a.effortOverridden = true
 	slog.Info("codex: reasoning effort changed", "reasoning_effort", a.reasoningEffort)
 }
 
 func (a *Agent) GetReasoningEffort() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.reasoningEffort
+	_, effort := a.effectiveModelAndReasoning()
+	return effort
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
@@ -184,29 +186,63 @@ func (a *Agent) configuredModels() []core.ModelOption {
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
-		return models
+		return prioritizeModelOptions(a.GetModel(), models)
 	}
-	if models := a.fetchModelsFromAPI(ctx); len(models) > 0 {
-		return models
+
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+
+	var models []core.ModelOption
+	models = appendUniqueModelOptions(models, readCodexConfigModelOptions(codexHome)...)
+	models = appendUniqueModelOptions(models, a.fetchModelsFromAPI(ctx)...)
+	models = appendUniqueModelOptions(models, readCodexCachedModels(codexHome)...)
+	if len(models) > 0 {
+		return prioritizeModelOptions(a.GetModel(), models)
 	}
-	if models := readCodexCachedModels(); len(models) > 0 {
-		return models
-	}
-	return []core.ModelOption{
-		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
-		{Name: "o3", Desc: "O3 (most capable reasoning)"},
-		{Name: "gpt-4.1", Desc: "GPT-4.1 (balanced)"},
-		{Name: "gpt-4.1-mini", Desc: "GPT-4.1 Mini (fast)"},
-		{Name: "gpt-4.1-nano", Desc: "GPT-4.1 Nano (fastest)"},
-		{Name: "codex-mini-latest", Desc: "Codex Mini (code-optimized)"},
-	}
+
+	return prioritizeModelOptions(a.GetModel(), defaultCodexModelOptions())
 }
 
-var openaiChatModels = map[string]bool{
-	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	"gpt-4o": true, "gpt-4o-mini": true,
-	"codex-mini-latest": true,
+func (a *Agent) effectiveModelAndReasoning() (model string, effort string) {
+	a.mu.RLock()
+	providers := append([]core.ProviderConfig(nil), a.providers...)
+	activeIdx := a.activeIdx
+	model = strings.TrimSpace(a.model)
+	effort = strings.TrimSpace(a.reasoningEffort)
+	codexHome := a.codexHome
+	modelOverridden := a.modelOverridden
+	effortOverridden := a.effortOverridden
+	a.mu.RUnlock()
+
+	if providerModel := strings.TrimSpace(core.GetProviderModel(providers, activeIdx, "")); providerModel != "" {
+		model = providerModel
+	}
+	if activeIdx >= 0 && activeIdx < len(providers) {
+		return model, effort
+	}
+
+	defaults := readCodexRuntimeDefaults(codexHome)
+	if !modelOverridden && strings.TrimSpace(defaults.Model) != "" {
+		model = strings.TrimSpace(defaults.Model)
+	}
+	if !effortOverridden && strings.TrimSpace(defaults.ReasoningEffort) != "" {
+		effort = normalizeReasoningEffort(defaults.ReasoningEffort)
+	}
+	return model, effort
+}
+
+func defaultCodexModelOptions() []core.ModelOption {
+	return []core.ModelOption{
+		{Name: "gpt-5.5", Desc: "GPT-5.5 (frontier)"},
+		{Name: "gpt-5.4", Desc: "GPT-5.4 (balanced)"},
+		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast)"},
+		{Name: "gpt-5.3-codex", Desc: "GPT-5.3 Codex (code-optimized)"},
+		{Name: "gpt-5.2", Desc: "GPT-5.2"},
+		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
+		{Name: "o3", Desc: "O3 (reasoning)"},
+		{Name: "codex-mini-latest", Desc: "Codex Mini (code-optimized)"},
+	}
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -260,7 +296,7 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	var models []core.ModelOption
 	for _, m := range result.Data {
-		if openaiChatModels[m.ID] {
+		if isLikelyCodexChatModel(m.ID) {
 			models = append(models, core.ModelOption{Name: m.ID})
 		}
 	}
@@ -268,14 +304,32 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 	return models
 }
 
-func readCodexCachedModels() []core.ModelOption {
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
+func isLikelyCodexChatModel(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return false
+	}
+	blocked := []string{"embedding", "moderation", "whisper", "tts", "audio", "transcribe", "image", "vision", "realtime"}
+	for _, token := range blocked {
+		if strings.Contains(id, token) {
+			return false
 		}
-		codexHome = filepath.Join(home, ".codex")
+	}
+	return strings.HasPrefix(id, "gpt-") ||
+		strings.HasPrefix(id, "o1") ||
+		strings.HasPrefix(id, "o3") ||
+		strings.HasPrefix(id, "o4") ||
+		strings.Contains(id, "codex")
+}
+
+func readCodexCachedModels(codexHomeArg ...string) []core.ModelOption {
+	codexHome := ""
+	if len(codexHomeArg) > 0 {
+		codexHome = strings.TrimSpace(codexHomeArg[0])
+	}
+	codexHome = resolveCodexHomeDir(codexHome)
+	if codexHome == "" {
+		return nil
 	}
 	path := filepath.Join(codexHome, "models_cache.json")
 	b, err := os.ReadFile(path)
@@ -331,6 +385,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
+	workDir := a.workDir
 	mode := a.mode
 	model := a.model
 	reasoningEffort := a.reasoningEffort
@@ -339,10 +394,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	cliBin := a.cliBin
 	cliExtraArgs := a.cliExtraArgs
+	modelOverridden := a.modelOverridden
+	effortOverridden := a.effortOverridden
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	var baseURL string
-	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
+	hasActiveProvider := a.activeIdx >= 0 && a.activeIdx < len(a.providers)
+	if hasActiveProvider {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
@@ -350,6 +408,29 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
+
+	if !hasActiveProvider {
+		defaults := readCodexRuntimeDefaults(codexHome)
+		if !modelOverridden && strings.TrimSpace(defaults.Model) != "" {
+			model = strings.TrimSpace(defaults.Model)
+		}
+		if !effortOverridden && strings.TrimSpace(defaults.ReasoningEffort) != "" {
+			reasoningEffort = normalizeReasoningEffort(defaults.ReasoningEffort)
+		}
+		if strings.TrimSpace(defaults.BaseURL) != "" {
+			baseURL = strings.TrimSpace(defaults.BaseURL)
+			extraEnv = upsertEnv(extraEnv, "OPENAI_BASE_URL", baseURL)
+		}
+		if strings.TrimSpace(defaults.APIKey) != "" {
+			extraEnv = upsertEnv(extraEnv, "OPENAI_API_KEY", strings.TrimSpace(defaults.APIKey))
+		}
+		if strings.TrimSpace(defaults.ModelProvider) != "" {
+			provName = strings.TrimSpace(defaults.ModelProvider)
+			provAPIKey = strings.TrimSpace(defaults.APIKey)
+			provWireAPI = strings.TrimSpace(defaults.WireAPI)
+			provHeaders = defaults.HTTPHeaders
+		}
+	}
 
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
@@ -361,13 +442,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, a.workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

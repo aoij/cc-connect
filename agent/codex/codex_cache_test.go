@@ -28,6 +28,7 @@ func TestAvailableModels_FallbackToModelsCache(t *testing.T) {
 	}
 
 	t.Setenv("CODEX_HOME", tmp)
+	t.Setenv("CC_SWITCH_DB_PATH", tmp+"/missing-cc-switch.db")
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_BASE_URL", srv.URL)
 
@@ -40,4 +41,3 @@ func TestAvailableModels_FallbackToModelsCache(t *testing.T) {
 		t.Fatalf("models = %v, want [gpt-5.4 gpt-5.3-codex]", models)
 	}
 }
-
