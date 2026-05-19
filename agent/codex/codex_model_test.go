@@ -95,7 +95,7 @@ func TestSetModel_OverridesCCSwitchCurrentForRuntime(t *testing.T) {
 	}
 }
 
-func TestAvailableModels_IncludesCCSwitchAndCodexConfigModels(t *testing.T) {
+func TestAvailableModels_IncludesCurrentProviderAndCodexModels(t *testing.T) {
 	tmp := t.TempDir()
 	codexHome := filepath.Join(tmp, ".codex")
 	writeTestCodexConfig(t, codexHome, "gpt-5.4", "xhigh")
@@ -115,10 +115,16 @@ func TestAvailableModels_IncludesCCSwitchAndCodexConfigModels(t *testing.T) {
 		t.Fatalf("first model = %q, want current cc-switch model gpt-5.5; models=%v", models[0].Name, models)
 	}
 	if !hasModelOption(models, "gpt-5.4") {
-		t.Fatalf("models = %v, want gpt-5.4 from Codex config/other provider", models)
+		t.Fatalf("models = %v, want gpt-5.4 from Codex config", models)
 	}
 	if !hasModelOption(models, "gpt-5.4-mini") || !hasModelOption(models, "gpt-5.3-codex") {
 		t.Fatalf("models = %v, want Codex built-in model choices", models)
+	}
+
+	for _, m := range models {
+		if m.Name == "other-provider-model" {
+			t.Fatalf("models = %v, should not include non-current cc-switch provider models", models)
+		}
 	}
 }
 
@@ -210,7 +216,7 @@ func writeTestCCSwitchDB(t *testing.T, dir string) string {
 		}
 	}
 	insert("current", "ep", "gpt-5.5", 1)
-	insert("other", "other", "gpt-5.4", 0)
+	insert("other", "other", "other-provider-model", 0)
 	return dbPath
 }
 

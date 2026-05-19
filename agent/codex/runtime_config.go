@@ -71,25 +71,22 @@ func (d *codexRuntimeDefaults) fillMissing(other codexRuntimeDefaults) {
 
 func readCodexConfigModelOptions(codexHome string) []core.ModelOption {
 	var models []core.ModelOption
+	current := codexRuntimeDefaults{}
 	for _, cfg := range readCCSwitchCodexRuntimes() {
-		model := strings.TrimSpace(cfg.Model)
-		if model == "" {
-			continue
-		}
-		desc := "cc-switch"
-		if cfg.ProviderName != "" {
-			desc += ": " + cfg.ProviderName
-		}
 		if cfg.IsCurrent {
-			desc = "cc-switch current"
-			if cfg.ProviderName != "" {
-				desc += ": " + cfg.ProviderName
-			}
+			current = cfg
+			break
 		}
-		models = appendUniqueModelOptions(models, core.ModelOption{Name: model, Desc: desc})
-		for _, target := range cfg.MigrationTargets {
-			models = appendUniqueModelOptions(models, core.ModelOption{Name: target, Desc: "cc-switch migration target"})
+	}
+	if strings.TrimSpace(current.Model) != "" {
+		desc := "cc-switch current"
+		if current.ProviderName != "" {
+			desc += ": " + current.ProviderName
 		}
+		models = appendUniqueModelOptions(models, core.ModelOption{Name: strings.TrimSpace(current.Model), Desc: desc})
+	}
+	for _, target := range current.MigrationTargets {
+		models = appendUniqueModelOptions(models, core.ModelOption{Name: target, Desc: "Codex migration target"})
 	}
 
 	local := readCodexConfigRuntime(codexHome)
