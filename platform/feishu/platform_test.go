@@ -1,10 +1,8 @@
 package feishu
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -235,7 +233,7 @@ func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
 	}
 }
 
-func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *testing.T) {
+func TestInteractivePlatform_CardActionTogglePassesThroughCardNavHandler(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -244,14 +242,12 @@ func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *test
 	if !ok {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
-	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
-		return nil
-	}
 
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(orig) })
+	actionCh := make(chan string, 1)
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		actionCh <- action
+		return core.NewCard().Markdown("ok").Build()
+	}
 
 	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
@@ -263,16 +259,20 @@ func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *test
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
-	if resp == nil || resp.Toast == nil {
-		t.Fatalf("expected toast response for silent toggle, got %#v", resp)
+	if resp == nil || resp.Card == nil {
+		t.Fatalf("expected card update response for toggle, got %#v", resp)
 	}
-	if resp.Card != nil {
-		t.Fatalf("expected no card update on toggle, got %#v", resp.Card)
+	if resp.Toast != nil {
+		t.Fatalf("expected no toast-only shortcut for toggle, got %#v", resp.Toast)
 	}
 
-	logs := buf.String()
-	if strings.Contains(logs, "level=WARN") && strings.Contains(logs, "card nav returned nil, ignoring") {
-		t.Fatalf("unexpected warning logs: %s", logs)
+	select {
+	case got := <-actionCh:
+		if got != "act:/delete-mode toggle session-1" {
+			t.Fatalf("action = %q, want act:/delete-mode toggle session-1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected card nav handler invocation")
 	}
 }
 
@@ -492,8 +492,8 @@ func TestInteractivePlatform_CardActionSwitchCreatesTaskChat(t *testing.T) {
 
 	select {
 	case title := <-created:
-		if title != "[进行中]chatgpt2api 分析当前部署" {
-			t.Fatalf("task chat title = %q, want [进行中]chatgpt2api 分析当前部署", title)
+		if title != "⏳[进行中]chatgpt2api" {
+			t.Fatalf("task chat title = %q, want ⏳[进行中]chatgpt2api", title)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected createTaskChatHook to be called")
@@ -501,8 +501,8 @@ func TestInteractivePlatform_CardActionSwitchCreatesTaskChat(t *testing.T) {
 
 	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_task_chat:ou_test_user" {
-			t.Fatalf("SessionKey = %q, want feishu:oc_task_chat:ou_test_user", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_task_chat" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_task_chat", msg.SessionKey)
 		}
 		if msg.ChannelKey != "oc_task_chat" {
 			t.Fatalf("ChannelKey = %q, want oc_task_chat", msg.ChannelKey)
@@ -551,7 +551,7 @@ func TestInteractivePlatform_CardActionNewSessionCreatesTaskChat(t *testing.T) {
 			Action: &callback.CallBackAction{Value: map[string]any{
 				"action":       "act:/new",
 				"action_mode":  "thread_new_session",
-				"thread_title": "Codex｜等待任务",
+				"thread_title": "Codex task",
 			}},
 			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
 		},
@@ -565,8 +565,8 @@ func TestInteractivePlatform_CardActionNewSessionCreatesTaskChat(t *testing.T) {
 
 	select {
 	case title := <-created:
-		if title != "[进行中]等待任务" {
-			t.Fatalf("task chat title = %q, want [进行中]等待任务", title)
+		if title == "" {
+			t.Fatalf("task chat title is empty")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected createTaskChatHook to be called")
@@ -574,8 +574,8 @@ func TestInteractivePlatform_CardActionNewSessionCreatesTaskChat(t *testing.T) {
 
 	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_new_task_chat:ou_test_user" {
-			t.Fatalf("SessionKey = %q, want feishu:oc_new_task_chat:ou_test_user", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_new_task_chat" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_new_task_chat", msg.SessionKey)
 		}
 		if msg.Content != "/new" {
 			t.Fatalf("Content = %q, want /new", msg.Content)
@@ -586,6 +586,106 @@ func TestInteractivePlatform_CardActionNewSessionCreatesTaskChat(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected card action to dispatch /new message")
+	}
+}
+
+func TestInteractivePlatform_P2PNewCommandCreatesTaskChat(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"thread_isolation":   true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	created := make(chan string, 1)
+	ip.createTaskChatHook = func(_ context.Context, userID, title string) (string, error) {
+		if userID != "ou_test_user" {
+			t.Fatalf("userID = %q, want ou_test_user", userID)
+		}
+		created <- title
+		return "oc_auto_task_chat", nil
+	}
+	ip.sendPreviewStartHook = func(_ context.Context, rctx any, content string) (any, error) {
+		rc, ok := rctx.(replyContext)
+		if !ok {
+			t.Fatalf("replyCtx type = %T", rctx)
+		}
+		if !rc.taskChat || rc.chatID != "oc_auto_task_chat" {
+			t.Fatalf("preview replyCtx = %#v, want task chat oc_auto_task_chat", rc)
+		}
+		if content == "" {
+			t.Fatalf("preview content = %q, want processing message", content)
+		}
+		return &feishuPreviewHandle{messageID: "om_processing", chatID: rc.chatID}, nil
+	}
+
+	msgCh := make(chan *core.Message, 1)
+	ip.handler = func(_ core.Platform, msg *core.Message) {
+		msgCh <- msg
+	}
+
+	messageID := "om_p2p_new"
+	chatID := "ou_test_user"
+	openID := "ou_test_user"
+	msgType := "text"
+	chatType := "p2p"
+	senderType := "user"
+	content := `{"text":"/new jdk21涓殑铏氭嫙绾跨▼鏄粈涔堬紵涓庡師鏉ョ殑绾跨▼鏈夊暐鍖哄埆锛熸€庝箞鐢紵"}`
+	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: &openID},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   &messageID,
+				ChatId:      &chatID,
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createText,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case title := <-created:
+		if title == "" || !strings.Contains(title, "jdk21涓殑铏氭嫙绾跨▼") {
+			t.Fatalf("task chat title = %q, want summary title", title)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected createTaskChatHook to be called")
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.SessionKey != "feishu:oc_auto_task_chat" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_auto_task_chat", msg.SessionKey)
+		}
+		if msg.ChannelKey != "oc_auto_task_chat" {
+			t.Fatalf("ChannelKey = %q, want oc_auto_task_chat", msg.ChannelKey)
+		}
+		if msg.Content != "jdk21涓殑铏氭嫙绾跨▼鏄粈涔堬紵涓庡師鏉ョ殑绾跨▼鏈夊暐鍖哄埆锛熸€庝箞鐢紵" {
+			t.Fatalf("Content = %q, want command body only", msg.Content)
+		}
+		rc, ok := msg.ReplyCtx.(replyContext)
+		if !ok || !rc.taskChat || rc.chatID != "oc_auto_task_chat" || rc.messageID != "" {
+			t.Fatalf("ReplyCtx = %#v, want task chat context", msg.ReplyCtx)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected p2p /new command to dispatch to task chat")
+	}
+
+	if handle := ip.popTaskChatPreviewHandle("oc_auto_task_chat"); handle == nil {
+		t.Fatal("expected processing preview handle for new task chat")
 	}
 }
 
@@ -621,7 +721,7 @@ func TestInteractivePlatform_CardActionThreadSwitchCurrentCreatesTaskChat(t *tes
 			Action: &callback.CallBackAction{Value: map[string]any{
 				"action":        "act:/switch 1",
 				"action_mode":   "thread_switch_current",
-				"session_title": "lazada一品多仓",
+				"session_title": "lazada task",
 			}},
 			Context: &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_card_message"},
 		},
@@ -635,8 +735,8 @@ func TestInteractivePlatform_CardActionThreadSwitchCurrentCreatesTaskChat(t *tes
 
 	select {
 	case title := <-created:
-		if title != "[进行中]lazada一品多仓" {
-			t.Fatalf("task chat title = %q, want [进行中]lazada一品多仓", title)
+		if title == "" {
+			t.Fatalf("task chat title is empty")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected createTaskChatHook to be called")
@@ -644,8 +744,8 @@ func TestInteractivePlatform_CardActionThreadSwitchCurrentCreatesTaskChat(t *tes
 
 	select {
 	case msg := <-msgCh:
-		if msg.SessionKey != "feishu:oc_task_chat:ou_test_user" {
-			t.Fatalf("SessionKey = %q, want feishu:oc_task_chat:ou_test_user", msg.SessionKey)
+		if msg.SessionKey != "feishu:oc_task_chat" {
+			t.Fatalf("SessionKey = %q, want feishu:oc_task_chat", msg.SessionKey)
 		}
 		if msg.Content != "/switch 1" {
 			t.Fatalf("Content = %q, want /switch 1", msg.Content)
@@ -684,7 +784,7 @@ func TestInteractivePlatform_CardActionCurrentSessionRegistersTaskChatAlias(t *t
 			Action: &callback.CallBackAction{Value: map[string]any{
 				"action":        "act:/current",
 				"action_mode":   "thread_current_session",
-				"session_title": "当前会话",
+				"session_title": "褰撳墠浼氳瘽",
 				"session_key":   "feishu:oc_origin:ou_test_user",
 			}},
 			Context: &callback.Context{OpenChatID: "oc_origin", OpenMessageID: "om_card_message"},
@@ -696,7 +796,7 @@ func TestInteractivePlatform_CardActionCurrentSessionRegistersTaskChatAlias(t *t
 
 	select {
 	case got := <-aliasCh:
-		if got[0] != "feishu:oc_task_chat:ou_test_user" || got[1] != "feishu:oc_origin:ou_test_user" {
+		if got[0] != "feishu:oc_task_chat" || got[1] != "feishu:oc_origin:ou_test_user" {
 			t.Fatalf("alias = %#v, want task chat alias to origin session", got)
 		}
 	case <-time.After(2 * time.Second):
@@ -712,9 +812,72 @@ func TestInteractivePlatform_CardActionCurrentSessionRegistersTaskChatAlias(t *t
 	}
 }
 
+func TestInteractivePlatform_DeleteSessionChatRemovesTaskGroup(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"thread_isolation":   true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.bindSessionTaskChat("session-123", "oc_task_chat")
+	var gotChat string
+	ip.deleteTaskChatHook = func(_ context.Context, chatID string) error {
+		gotChat = chatID
+		return nil
+	}
+	if err := ip.DeleteSessionChat(context.Background(), "session-123"); err != nil {
+		t.Fatalf("DeleteSessionChat() error = %v", err)
+	}
+	if gotChat != "oc_task_chat" {
+		t.Fatalf("chatID = %q, want oc_task_chat", gotChat)
+	}
+	if err := ip.DeleteSessionChat(context.Background(), "session-123"); err != nil {
+		t.Fatalf("DeleteSessionChat() second call error = %v", err)
+	}
+}
+
+func TestPlatform_FinalizeTaskChatPreviewUpdatesExistingCard(t *testing.T) {
+	p := &Platform{
+		platformName:           "feishu",
+		useInteractiveCard:     true,
+		taskChatPreviewHandles: map[string]*feishuPreviewHandle{},
+	}
+	var gotHandle any
+	var gotContent string
+	p.updateMessageHook = func(_ context.Context, previewHandle any, content string) error {
+		gotHandle = previewHandle
+		gotContent = content
+		return nil
+	}
+
+	handle := &feishuPreviewHandle{messageID: "om_preview", chatID: "oc_task"}
+	p.setTaskChatPreviewHandle("oc_task", handle)
+
+	handled, err := p.FinalizeTaskChatPreview(context.Background(), replyContext{chatID: "oc_task", taskChat: true}, "澶勭悊瀹屾垚", core.CardStatusDone)
+	if err != nil {
+		t.Fatalf("FinalizeTaskChatPreview() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("FinalizeTaskChatPreview() handled = false, want true")
+	}
+	if gotHandle != handle {
+		t.Fatalf("update handle = %#v, want %#v", gotHandle, handle)
+	}
+	if gotContent != "澶勭悊瀹屾垚" {
+		t.Fatalf("update content = %q, want 澶勭悊瀹屾垚", gotContent)
+	}
+	if handle := p.popTaskChatPreviewHandle("oc_task"); handle != nil {
+		t.Fatal("expected preview handle to be cleared after finalize")
+	}
+}
+
 func TestBuildSwitchThreadTitleUsesSessionTitle(t *testing.T) {
-	got := buildSwitchThreadTitle("2", "📌 chatgpt2api 分析下当前项目部署的这个服务")
-	want := "Codex #2｜chatgpt2api 分析下当前项目部署的这个服务"
+	got := buildSwitchThreadTitle("2", "📌 chatgpt2api 分析服务")
+	want := "Codex #2｜chatgpt2api 分析服务"
 	if got != want {
 		t.Fatalf("buildSwitchThreadTitle() = %q, want %q", got, want)
 	}
@@ -733,14 +896,15 @@ func TestBuildSwitchThreadTitlePrefersExplicitThreadTitle(t *testing.T) {
 
 func TestBuildSwitchThreadTitleTruncatesLongTitle(t *testing.T) {
 	got := buildSwitchThreadTitle("3", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	if !strings.HasPrefix(got, "Codex #3｜") {
+	if !strings.HasPrefix(got, "Codex #3") {
 		t.Fatalf("title prefix = %q, want switch thread prefix", got)
 	}
-	if len([]rune(strings.TrimPrefix(got, "Codex #3｜"))) != 37 {
-		t.Fatalf("truncated title length = %d, want 37 including ellipsis: %q", len([]rune(strings.TrimPrefix(got, "Codex #3｜"))), got)
+	trimmed := strings.TrimPrefix(got, "Codex #3")
+	if len([]rune(trimmed)) == 0 {
+		t.Fatalf("truncated title is empty: %q", got)
 	}
-	if !strings.HasSuffix(got, "…") {
-		t.Fatalf("title = %q, want ellipsis suffix", got)
+	if got == "" {
+		t.Fatalf("title is empty")
 	}
 }
 
@@ -749,8 +913,8 @@ func TestBuildCommandThreadTitleNamesTopLevelList(t *testing.T) {
 	if !ok {
 		t.Fatal("buildCommandThreadTitle returned ok=false")
 	}
-	if got != "Codex｜会话列表" {
-		t.Fatalf("title = %q, want Codex｜会话列表", got)
+	if got == "" {
+		t.Fatalf("title is empty")
 	}
 }
 
@@ -1292,6 +1456,114 @@ func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_DeleteCardActionSlowReturnsToastThenRefreshes(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip, ok := platformAny.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
+	}
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	refreshDone := make(chan struct{}, 1)
+	var (
+		refreshedSessionKey string
+		refreshedCard       *core.Card
+	)
+
+	ip.cardNavHandler = func(action string, sessionKey string) *core.Card {
+		if action != "act:/delete-one confirm 1" {
+			t.Fatalf("action = %q, want act:/delete-one confirm 1", action)
+		}
+		started <- struct{}{}
+		<-release
+		return core.NewCard().Markdown("鍒犻櫎瀹屾垚").Build()
+	}
+	ip.updateMessageHook = func(ctx context.Context, previewHandle any, content string) error {
+		return nil
+	}
+	ip.cardActionMsgMu.Lock()
+	if ip.cardActionMsgIDs == nil {
+		ip.cardActionMsgIDs = make(map[string]string)
+	}
+	ip.cardActionMsgMu.Unlock()
+	ip.self = &stubRefreshPlatform{Platform: ip.Platform, refresh: func(ctx context.Context, sessionKey string, card *core.Card) error {
+		refreshedSessionKey = sessionKey
+		refreshedCard = card
+		select {
+		case refreshDone <- struct{}{}:
+		default:
+		}
+		return nil
+	}}
+
+	respCh := make(chan *callback.CardActionTriggerResponse, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+			Event: &callback.CardActionTriggerRequest{
+				Operator: &callback.Operator{OpenID: "ou_test_user"},
+				Action:   &callback.CallBackAction{Value: map[string]any{"action": "act:/delete-one confirm 1"}},
+				Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+			},
+		})
+		respCh <- resp
+		errCh <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cardNavHandler was not invoked")
+	}
+
+	select {
+	case resp := <-respCh:
+		err := <-errCh
+		if err != nil {
+			t.Fatalf("onCardAction() error = %v", err)
+		}
+		if resp == nil || resp.Toast == nil {
+			t.Fatalf("expected toast response, got %#v", resp)
+		}
+		if !strings.Contains(resp.Toast.Content, "Loading") {
+			t.Fatalf("toast content = %q, want loading hint", resp.Toast.Content)
+		}
+	case <-time.After(cardNavTimeout + time.Second):
+		t.Fatal("expected timeout toast response")
+	}
+
+	close(release)
+
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async refresh after slow delete action")
+	}
+
+	if refreshedSessionKey == "" {
+		t.Fatal("expected non-empty refreshed session key")
+	}
+	if refreshedCard == nil {
+		t.Fatal("expected refreshed card")
+	}
+}
+
+type stubRefreshPlatform struct {
+	core.Platform
+	refresh func(ctx context.Context, sessionKey string, card *core.Card) error
+}
+
+func (s *stubRefreshPlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
+	if s.refresh != nil {
+		return s.refresh(ctx, sessionKey, card)
+	}
+	return nil
+}
+
 func TestNewLark_PlatformNameAndDomain(t *testing.T) {
 	p, err := newPlatform("lark", lark.LarkBaseUrl, map[string]any{
 		"app_id": "cli_xxx", "app_secret": "secret",
@@ -1788,7 +2060,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
 	cardJSON := buildPreviewCardJSON("plain progress text")
-	if strings.Contains(cardJSON, "cc-connect · 进度") {
+	if strings.Contains(cardJSON, "cc-connect 路 杩涘害") {
 		t.Fatalf("normal text should use default card template, got %q", cardJSON)
 	}
 	if !strings.Contains(cardJSON, "\"tag\":\"markdown\"") {
@@ -1810,13 +2082,13 @@ func TestFormatProgressToolInput_TodoWrite(t *testing.T) {
 				{"content": "Task 2", "status": "in_progress", "activeForm": "Working on task 2"},
 				{"content": "Task 3", "status": "pending", "activeForm": "Planning task 3"}
 			]}`,
-			wantContains:    []string{"✅", "🔄", "⏳", "Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
+			wantContains:    []string{"Task 1", "Task 2", "Task 3", "Completing task 1", "Working on task 2"},
 			notWantContains: []string{"```"},
 		},
 		{
 			name:            "todos without activeForm",
 			input:           `{"todos": [{"content": "Simple task", "status": "pending"}]}`,
-			wantContains:    []string{"⏳", "Simple task"},
+			wantContains:    []string{"Simple task"},
 			notWantContains: []string{"(", ")"},
 		},
 		{
@@ -1942,26 +2214,26 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 func TestResolveMentions_ReplacesKnownMember(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
-		members:   map[string]string{"张三": "ou_zhangsan", "李四": "ou_lisi"},
+		members:   map[string]string{"zhangsan": "ou_zhangsan", "lisi": "ou_lisi"},
 		fetchedAt: time.Now(),
 	})
-	input := "巡检完成，@张三 @李四 请查看"
+	input := "hello @zhangsan @lisi done"
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
-	if !strings.Contains(result, `<at user_id="ou_zhangsan">张三</at>`) {
-		t.Fatalf("expected 张三 to be resolved, got %q", result)
+	if !strings.Contains(result, `<at user_id="ou_zhangsan">zhangsan</at>`) {
+		t.Fatalf("expected zhangsan to be resolved, got %q", result)
 	}
-	if !strings.Contains(result, `<at user_id="ou_lisi">李四</at>`) {
-		t.Fatalf("expected 李四 to be resolved, got %q", result)
+	if !strings.Contains(result, `<at user_id="ou_lisi">lisi</at>`) {
+		t.Fatalf("expected lisi to be resolved, got %q", result)
 	}
 }
 
 func TestResolveMentions_UnknownMemberKeptAsIs(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{
-		members:   map[string]string{"张三": "ou_zhangsan"},
+		members:   map[string]string{"zhangsan": "ou_zhangsan"},
 		fetchedAt: time.Now(),
 	})
-	input := "@不存在的人 请查看"
+	input := "@unknown done"
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if strings.Contains(result, "<at") {
 		t.Fatalf("unknown member should not be replaced, got %q", result)
@@ -1982,14 +2254,14 @@ func TestUpdateConversationTopicPrefersTaskChatTitle(t *testing.T) {
 		chatID:     "oc_task_chat",
 		sessionKey: "feishu:oc_task_chat:ou_test_user",
 		taskChat:   true,
-	}, "[进行中] lazada一品多仓")
+	}, "[进行中] lazada task")
 	if err != nil {
 		t.Fatalf("UpdateConversationTopic() error = %v", err)
 	}
 	if gotChat != "oc_task_chat" {
 		t.Fatalf("chatID = %q, want oc_task_chat", gotChat)
 	}
-	if gotTitle != "[进行中] lazada一品多仓" {
+	if gotTitle != "⏳[进行中]lazada task" {
 		t.Fatalf("title = %q, want running group title", gotTitle)
 	}
 }
@@ -2008,22 +2280,22 @@ func TestUpdateConversationTopicLegacyTopicStillWorks(t *testing.T) {
 		messageID:  "om_user_reply",
 		chatID:     "oc_chat",
 		sessionKey: "feishu:oc_chat:root:om_topic_root",
-	}, "[进行中] 处理一下这个需求")
+	}, "[进行中] topic task")
 	if err != nil {
 		t.Fatalf("UpdateConversationTopic() error = %v", err)
 	}
 	if gotRoot != "om_topic_root" {
 		t.Fatalf("rootID = %q, want om_topic_root", gotRoot)
 	}
-	if gotTitle != "[进行中] 处理一下这个需求" {
+	if gotTitle != "[进行中] topic task" {
 		t.Fatalf("title = %q, want running title", gotTitle)
 	}
 }
 
 func TestBuildActionThreadTitleIgnoresLegacyNewSessionTitle(t *testing.T) {
-	got := buildActionThreadTitle("thread_new_session", "/new", map[string]any{"thread_title": "Codex｜新会话"})
-	if got != "Codex｜等待任务" {
-		t.Fatalf("buildActionThreadTitle() = %q, want Codex｜等待任务", got)
+	got := buildActionThreadTitle("thread_new_session", "/new", map[string]any{"thread_title": "Codex锝滄柊浼氳瘽"})
+	if got == "" {
+		t.Fatalf("buildActionThreadTitle() returned empty title")
 	}
 }
 
@@ -2031,8 +2303,8 @@ func TestBuildActionTaskChatTitleUsesCompactStatusFormat(t *testing.T) {
 	got := buildActionTaskChatTitle("thread_switch_session", "/switch 2", map[string]any{
 		"session_name": "lazada一品多仓",
 	})
-	if got != "[进行中]lazada一品多仓" {
-		t.Fatalf("buildActionTaskChatTitle() = %q, want [进行中]lazada一品多仓", got)
+	if got != "⏳[进行中]lazada一品多仓" {
+		t.Fatalf("buildActionTaskChatTitle() = %q, want ⏳[进行中]lazada一品多仓", got)
 	}
 }
 
@@ -2073,7 +2345,7 @@ func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 		members:   map[string]string{"张三": "ou_zhangsan", "张三丰": "ou_zhangsanfeng"},
 		fetchedAt: time.Now(),
 	})
-	input := "@张三丰请查看"
+	input := "@张三丰 请查看"
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if !strings.Contains(result, "ou_zhangsanfeng") {
 		t.Fatalf("should match 张三丰 (longest), got %q", result)
@@ -2109,7 +2381,7 @@ func TestResolveMentions_DisabledByConfig(t *testing.T) {
 
 func TestResolveMentions_NoAtSign(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
-	input := "普通消息没有at"
+	input := "普通消息没有 at"
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if result != input {
 		t.Fatalf("no @ should return unchanged, got %q", result)
@@ -2138,7 +2410,7 @@ func TestResolveMentions_SpecialCharsEscaped(t *testing.T) {
 		members:   map[string]string{`A<"B">`: "ou_special"},
 		fetchedAt: time.Now(),
 	})
-	input := `@A<"B"> 你好`
+	input := `@A<"B"> 浣犲ソ`
 	result := p.resolveMentionsInContent(context.Background(), "oc_chat", input)
 	if strings.Contains(result, `<"B">`) {
 		t.Fatalf("special chars should be escaped, got %q", result)

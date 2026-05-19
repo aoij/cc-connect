@@ -113,10 +113,6 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 			"template": color,
 		}
 	}
-	if transformed, ok := renderDeleteModeCheckerCard(card, result); ok {
-		return transformed
-	}
-
 	var elements []map[string]any
 	for _, elem := range card.Elements {
 		switch e := elem.(type) {

@@ -389,11 +389,7 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	a.mu.RLock()
 	codexHome := a.codexHome
 	a.mu.RUnlock()
-	path := findSessionFile(sessionID, codexHome)
-	if path == "" {
-		return fmt.Errorf("session file not found: %s", sessionID)
-	}
-	return os.Remove(path)
+	return deleteCodexSession(sessionID, codexHome)
 }
 
 func (a *Agent) Stop() error { return nil }

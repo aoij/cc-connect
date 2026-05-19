@@ -1,0 +1,259 @@
+package codex
+
+import (
+	"database/sql"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestFindSessionFile_MatchesSessionMetaIDEvenWhenFilenameDiffers(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	sessionsDir := filepath.Join(codexHome, "sessions", "2026", "05", "18")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetID := "019dcde6-f301-75a2-b242-9d08dffac0fb"
+	filePath := filepath.Join(sessionsDir, "rollout-2026-05-18T10-00-00-019dd299-8fa6-7c40-87f6-324b7daae9ab.jsonl")
+	content := `{"timestamp":"2026-05-18T02:00:00Z","type":"session_meta","payload":{"id":"019dd299-8fa6-7c40-87f6-324b7daae9ab","cwd":"C:\\ai_work"}}` + "\n" +
+		`{"timestamp":"2026-05-18T02:00:01Z","type":"session_meta","payload":{"id":"` + targetID + `","cwd":"C:\\ai_work"}}` + "\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSessionFile(targetID, codexHome)
+	if got != filePath {
+		t.Fatalf("findSessionFile() = %q, want %q", got, filePath)
+	}
+}
+
+func TestScanSessionMetaIDs_DeduplicatesIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "sample.jsonl")
+	content := `{"type":"session_meta","payload":{"id":"a"}}` + "\n" +
+		`{"type":"session_meta","payload":{"id":"a"}}` + "\n" +
+		`{"type":"session_meta","payload":{"id":"b"}}` + "\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := scanSessionMetaIDs(filePath)
+	if err != nil {
+		t.Fatalf("scanSessionMetaIDs() error = %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Fatalf("scanSessionMetaIDs() = %#v, want [a b]", ids)
+	}
+}
+
+func TestListCodexSessions_UsesCodexAppStateThreads(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	otherDir := filepath.Join(tmpDir, "other")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	activeRollout := writeTestRollout(t, codexHome, "session-active", workDir)
+	archivedRollout := writeTestRollout(t, codexHome, "session-archived", workDir)
+	otherRollout := writeTestRollout(t, codexHome, "session-other", otherDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-active", activeRollout, workDir, "Codex App 标题", 0, 2000, "feature/test")
+	insertTestThread(t, db, "session-archived", archivedRollout, workDir, "归档标题", 1, 3000, "")
+	insertTestThread(t, db, "session-other", otherRollout, otherDir, "其他目录", 0, 4000, "")
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listCodexSessions() len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != "session-active" || got[0].Summary != "Codex App 标题" {
+		t.Fatalf("listCodexSessions()[0] = %#v", got[0])
+	}
+	if got[0].MessageCount != 2 {
+		t.Fatalf("MessageCount = %d, want 2", got[0].MessageCount)
+	}
+	if got[0].GitBranch != "feature/test" {
+		t.Fatalf("GitBranch = %q, want feature/test", got[0].GitBranch)
+	}
+}
+
+func TestListCodexSessions_FiltersToCodexSidebarThreadsWhenPresent(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	visibleRollout := writeTestRollout(t, codexHome, "session-visible", workDir)
+	hiddenRollout := writeTestRollout(t, codexHome, "session-hidden", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-visible", visibleRollout, workDir, "Visible", 0, 2000, "")
+	insertTestThread(t, db, "session-hidden", hiddenRollout, workDir, "Hidden", 0, 3000, "")
+	writeTestGlobalState(t, codexHome, "session-visible")
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "session-visible" {
+		t.Fatalf("listCodexSessions() = %#v, want only session-visible", got)
+	}
+}
+
+func TestListCodexSessions_TruncatesLongCodexAppTitles(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rollout := writeTestRollout(t, codexHome, "session-long", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	longTitle := ""
+	for i := 0; i < 240; i++ {
+		longTitle += "长"
+	}
+	insertTestThread(t, db, "session-long", rollout, workDir, longTitle, 0, 2000, "")
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listCodexSessions() len = %d, want 1", len(got))
+	}
+	if len([]rune(got[0].Summary)) != 180 {
+		t.Fatalf("summary rune len = %d, want 180", len([]rune(got[0].Summary)))
+	}
+	if got[0].Summary[len(got[0].Summary)-3:] != "..." {
+		t.Fatalf("summary = %q, want ellipsis suffix", got[0].Summary)
+	}
+}
+
+func TestDeleteCodexSession_ArchivesCodexAppThread(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rollout := writeTestRollout(t, codexHome, "session-delete", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-delete", rollout, workDir, "Delete me", 0, time.Now().Unix(), "")
+
+	if err := deleteCodexSession("session-delete", codexHome); err != nil {
+		t.Fatalf("deleteCodexSession() error = %v", err)
+	}
+
+	var archived int
+	var archivedPath string
+	if err := db.QueryRow(`select archived, rollout_path from threads where id = ?`, "session-delete").Scan(&archived, &archivedPath); err != nil {
+		t.Fatal(err)
+	}
+	if archived != 1 {
+		t.Fatalf("archived = %d, want 1", archived)
+	}
+	if fileExists(rollout) {
+		t.Fatalf("original rollout still exists: %s", rollout)
+	}
+	if !fileExists(archivedPath) {
+		t.Fatalf("archived rollout does not exist: %s", archivedPath)
+	}
+
+	sessions, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("listCodexSessions() after delete = %#v, want empty", sessions)
+	}
+}
+
+func createTestCodexStateDB(t *testing.T, codexHome string) *sql.DB {
+	t.Helper()
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(codexHome, "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+create table threads (
+	id text primary key,
+	rollout_path text,
+	cwd text,
+	title text,
+	first_user_message text,
+	preview text,
+	git_branch text,
+	archived integer,
+	updated_at integer,
+	updated_at_ms integer,
+	archived_at integer
+)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func writeTestGlobalState(t *testing.T, codexHome string, ids ...string) {
+	t.Helper()
+	entries := ""
+	for i, id := range ids {
+		if i > 0 {
+			entries += ","
+		}
+		entries += `"` + id + `":{"approvalPolicy":"never"}`
+	}
+	content := `{"electron-persisted-atom-state":{"heartbeat-thread-permissions-by-id":{` + entries + `}}}`
+	if err := os.WriteFile(filepath.Join(codexHome, ".codex-global-state.json"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertTestThread(t *testing.T, db *sql.DB, id, rolloutPath, cwd, title string, archived int, updatedAt int64, gitBranch string) {
+	t.Helper()
+	_, err := db.Exec(`
+insert into threads (id, rollout_path, cwd, title, first_user_message, preview, git_branch, archived, updated_at, updated_at_ms)
+values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, id, rolloutPath, cwd, title, "first message", "preview message", gitBranch, archived, updatedAt, updatedAt*1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestRollout(t *testing.T, codexHome, sessionID, cwd string) string {
+	t.Helper()
+	dir := filepath.Join(codexHome, "sessions", "2026", "05", "18")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-05-18T10-00-00-"+sessionID+".jsonl")
+	content := `{"timestamp":"2026-05-18T02:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + filepath.ToSlash(cwd) + `"}}` + "\n" +
+		`{"timestamp":"2026-05-18T02:00:01Z","type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"hello"}]}}` + "\n" +
+		`{"timestamp":"2026-05-18T02:00:02Z","type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"hi"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

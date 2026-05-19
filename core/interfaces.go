@@ -193,6 +193,20 @@ type ConversationTopicUpdater interface {
 	UpdateConversationTopic(ctx context.Context, replyCtx any, title string) error
 }
 
+// SessionChatCleanup is implemented by platforms that can clean up any
+// platform-side task chat/group associated with an agent session after the
+// session is deleted from the underlying agent.
+type SessionChatCleanup interface {
+	DeleteSessionChat(ctx context.Context, sessionID string) error
+}
+
+// SessionChatBinder is implemented by platforms that need to bind an
+// agent-session ID to a platform-side task chat/group after the agent session
+// is created.
+type SessionChatBinder interface {
+	BindSessionChat(ctx context.Context, sessionID string, replyCtx any) error
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".
@@ -550,4 +564,11 @@ const (
 // updating the visual status of a preview card header.
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
+}
+
+// TaskChatPreviewFinalizer is implemented by platforms that create an initial
+// "processing" preview message for a dedicated task chat/group and can replace
+// it in-place with the final result or error state.
+type TaskChatPreviewFinalizer interface {
+	FinalizeTaskChatPreview(ctx context.Context, replyCtx any, content string, status CardStatus) (handled bool, err error)
 }

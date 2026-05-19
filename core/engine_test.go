@@ -50,9 +50,13 @@ func (s *recordingAgentSession) RespondPermission(id string, res PermissionResul
 }
 
 type stubPlatformEngine struct {
-	n    string
-	sent []string
-	mu   sync.Mutex
+	n                   string
+	sent                []string
+	mu                  sync.Mutex
+	deletedSessionChats []string
+	boundSessionChats   []string
+	finalizedPreviews   []string
+	finalizeStatuses    []CardStatus
 }
 
 func (p *stubPlatformEngine) Name() string               { return p.n }
@@ -70,6 +74,25 @@ func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) erro
 	return nil
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
+func (p *stubPlatformEngine) DeleteSessionChat(_ context.Context, sessionID string) error {
+	p.mu.Lock()
+	p.deletedSessionChats = append(p.deletedSessionChats, sessionID)
+	p.mu.Unlock()
+	return nil
+}
+func (p *stubPlatformEngine) BindSessionChat(_ context.Context, sessionID string, _ any) error {
+	p.mu.Lock()
+	p.boundSessionChats = append(p.boundSessionChats, sessionID)
+	p.mu.Unlock()
+	return nil
+}
+func (p *stubPlatformEngine) FinalizeTaskChatPreview(_ context.Context, _ any, content string, status CardStatus) (bool, error) {
+	p.mu.Lock()
+	p.finalizedPreviews = append(p.finalizedPreviews, content)
+	p.finalizeStatuses = append(p.finalizeStatuses, status)
+	p.mu.Unlock()
+	return true, nil
+}
 
 func (p *stubPlatformEngine) getSent() []string {
 	p.mu.Lock()
@@ -77,6 +100,32 @@ func (p *stubPlatformEngine) getSent() []string {
 	cp := make([]string, len(p.sent))
 	copy(cp, p.sent)
 	return cp
+}
+
+func (p *stubPlatformEngine) getDeletedSessionChats() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]string, len(p.deletedSessionChats))
+	copy(cp, p.deletedSessionChats)
+	return cp
+}
+
+func (p *stubPlatformEngine) getBoundSessionChats() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]string, len(p.boundSessionChats))
+	copy(cp, p.boundSessionChats)
+	return cp
+}
+
+func (p *stubPlatformEngine) getFinalizedPreviews() ([]string, []CardStatus) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	contents := make([]string, len(p.finalizedPreviews))
+	copy(contents, p.finalizedPreviews)
+	statuses := make([]CardStatus, len(p.finalizeStatuses))
+	copy(statuses, p.finalizeStatuses)
+	return contents, statuses
 }
 
 func (p *stubPlatformEngine) clearSent() {
@@ -12301,10 +12350,10 @@ func TestConversationTopicUpdatedDuringTaskLifecycle(t *testing.T) {
 	for time.Now().Before(deadline) {
 		titles := p.getTopicTitles()
 		if len(titles) >= 2 {
-			if titles[0] != "[进行中]处理一下这个需求，顺便跑测试" {
+			if titles[0] != "[进行中]处理这个需求" {
 				t.Fatalf("first title = %q, want running title", titles[0])
 			}
-			if titles[len(titles)-1] != "[已完成]处理一下这个需求，顺便跑测试" {
+			if titles[len(titles)-1] != "[已完成]处理这个需求" {
 				t.Fatalf("last title = %q, want done title", titles[len(titles)-1])
 			}
 			return
@@ -12312,6 +12361,51 @@ func TestConversationTopicUpdatedDuringTaskLifecycle(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("expected running and done topic updates, got %#v", p.getTopicTitles())
+}
+
+func TestConversationTopicKeepsAbbreviatedGroupBaseAcrossTurns(t *testing.T) {
+	sess := newCodexLikeSession("codex-topic-thread-002")
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubTopicUpdatePlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: "feishu:oc_group:ou_user",
+		Platform:   "feishu",
+		ChatName:   "[进行中]chatgpt2api",
+		Content:    "当前处理的进度？",
+		ReplyCtx:   "group-ctx",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		titles := p.getTopicTitles()
+		if len(titles) >= 1 {
+			if titles[0] != "[已完成]chatgpt2api" {
+				t.Fatalf("title = %q, want [已完成]chatgpt2api", titles[0])
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected running and done topic updates, got %#v", p.getTopicTitles())
+}
+
+func TestAbbreviateTaskTitle(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"分析下当前项目部署的这个服务，把改动的代码提交到aoij github上", "分析项目部署服务"},
+		{"当前处理的进度？", "当前处理的进度"},
+		{"lazada一品多仓", "lazada一品多仓"},
+		{"帮我看下 chatgpt2api 处理完成了吗？", "chatgpt2api"},
+	}
+	for _, tc := range cases {
+		if got := AbbreviateTaskTitle(tc.in, 24); got != tc.want {
+			t.Fatalf("AbbreviateTaskTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
 }
 
 // TestSessionName_CodexLikeFlow does an end-to-end test simulating real codex
@@ -12517,5 +12611,76 @@ func TestBtwAlias_ResolvesToPs(t *testing.T) {
 	id2 := matchPrefix("ps", builtinCommands)
 	if id2 != "ps" {
 		t.Fatalf("matchPrefix(\"ps\") = %q, want \"ps\"", id2)
+	}
+}
+
+func TestCmdDelete_CleansUpPlatformTaskChat(t *testing.T) {
+	agent := &stubDeleteAgent{
+		stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+			{ID: "agent-active", Summary: "active"},
+			{ID: "agent-target", Summary: "target"},
+		}},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+
+	active := e.sessions.NewSession(sessionKey, "active")
+	active.SetAgentSessionID("agent-active", "stub")
+	target := e.sessions.NewSession("test:user2", "target")
+	target.SetAgentSessionID("agent-target", "stub")
+	_ = target
+
+	e.cmdDelete(p, &Message{SessionKey: sessionKey, ReplyCtx: "ctx", Platform: "test"}, []string{"2"})
+
+	if got := p.getDeletedSessionChats(); len(got) != 1 || got[0] != "agent-target" {
+		t.Fatalf("deleted session chats = %#v, want [agent-target]", got)
+	}
+}
+
+func TestReceiveMessage_BindsPlatformTaskChatAfterSessionStart(t *testing.T) {
+	agent := &controllableAgent{nextSession: newControllableSession("agent-task-1")}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: "test:taskchat:user1",
+		Content:    "run task",
+		ReplyCtx:   "task-reply",
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	if got := p.getBoundSessionChats(); len(got) != 1 || got[0] != "agent-task-1" {
+		t.Fatalf("bound session chats = %#v, want [agent-task-1]", got)
+	}
+}
+
+func TestProcessInteractiveEvents_FinalizesTaskChatPreviewOnResult(t *testing.T) {
+	sess := newControllableSession("task-preview-done")
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	key := "test:task:user1"
+	session := e.sessions.NewSession(key, "task")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "task-ctx",
+		workspaceDir: "",
+		agent:        e.agent,
+	}
+	e.interactiveStates[key] = state
+
+	sess.events <- Event{Type: EventResult, Content: "任务完成", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "task-ctx")
+
+	contents, statuses := p.getFinalizedPreviews()
+	if len(contents) != 1 || contents[0] != "任务完成" {
+		t.Fatalf("finalized previews = %#v, want [任务完成]", contents)
+	}
+	if len(statuses) != 1 || statuses[0] != CardStatusDone {
+		t.Fatalf("finalize statuses = %#v, want [CardStatusDone]", statuses)
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("sent messages = %#v, want none when preview finalized in place", got)
 	}
 }

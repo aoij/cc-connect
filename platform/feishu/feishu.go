@@ -167,7 +167,10 @@ type Platform struct {
 	createThreadRootHook      func(ctx context.Context, chatID, content string) (string, error)
 	updateThreadRootHook      func(ctx context.Context, rootID, content string) error
 	createTaskChatHook        func(ctx context.Context, userID, title string) (string, error)
+	deleteTaskChatHook        func(ctx context.Context, chatID string) error
 	updateTaskChatTitleHook   func(ctx context.Context, chatID, title string) error
+	sendPreviewStartHook      func(ctx context.Context, rctx any, content string) (any, error)
+	updateMessageHook         func(ctx context.Context, previewHandle any, content string) error
 	topicRootMu               sync.Mutex
 	topicRootTitleByMessageID map[string]string
 	topicRootTitleByThreadID  map[string]string
@@ -179,6 +182,8 @@ type Platform struct {
 	botTaskChatMu             sync.Mutex
 	botTaskChatIDs            map[string]time.Time // chat_id -> created time, allows no-mention replies in bot-created task groups
 	taskChatStorePath         string
+	sessionTaskChats          map[string]string               // agent session id -> task chat id
+	taskChatPreviewHandles    map[string]*feishuPreviewHandle // chat_id -> in-flight processing card
 }
 
 type interactivePlatform struct {
@@ -310,6 +315,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		encryptKey:                 encryptKey,
 		peerBots:                   peerBots,
 		botTaskChatIDs:             map[string]time.Time{},
+		sessionTaskChats:           map[string]string{},
+		taskChatPreviewHandles:     map[string]*feishuPreviewHandle{},
 		taskChatStorePath:          taskChatStorePath(ccDataDir, ccProject, name, appID),
 	}
 	base.loadBotTaskChats()
@@ -605,11 +612,19 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					Toast: &callback.Toast{Type: "error", Content: "创建任务群失败"},
 				}, nil
 			}
-			newSessionKey := fmt.Sprintf("%s:%s:%s", p.tag(), newChatID, userID)
+			newSessionKey := p.taskChatSessionKey(newChatID, userID)
+			if sid, _ := event.Event.Action.Value["session_id"].(string); strings.TrimSpace(sid) != "" {
+				p.bindSessionTaskChat(strings.TrimSpace(sid), newChatID)
+			}
 			if actionMode == "thread_current_session" && sessionKey != "" && p.sessionAliasHook != nil {
 				p.sessionAliasHook(newSessionKey, sessionKey)
 			}
 			newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
+			if handleAny, err := p.SendPreviewStart(context.Background(), newReplyCtx, "任务已接收，正在处理中，请稍候。"); err != nil {
+				slog.Warn(p.tag()+": failed to send task chat processing preview", "chat_id", newChatID, "error", err)
+			} else if handle, ok := handleAny.(*feishuPreviewHandle); ok {
+				p.setTaskChatPreviewHandle(newChatID, handle)
+			}
 			go func() {
 				if cmdToDispatch != "" {
 					p.handler(p.dispatchPlatform(), &core.Message{
@@ -643,8 +658,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 						Toast: &callback.Toast{Type: "error", Content: "创建任务群失败"},
 					}, nil
 				}
-				newSessionKey := fmt.Sprintf("%s:%s:%s", p.tag(), newChatID, userID)
+				newSessionKey := p.taskChatSessionKey(newChatID, userID)
+				p.bindSessionTaskChat(target, newChatID)
 				newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
+				if handleAny, err := p.SendPreviewStart(context.Background(), newReplyCtx, "任务已接收，正在处理中，请稍候。"); err != nil {
+					slog.Warn(p.tag()+": failed to send task chat processing preview", "chat_id", newChatID, "error", err)
+				} else if handle, ok := handleAny.(*feishuPreviewHandle); ok {
+					p.setTaskChatPreviewHandle(newChatID, handle)
+				}
 				go func() {
 					p.handler(p.dispatchPlatform(), &core.Message{
 						SessionKey: newSessionKey,
@@ -675,23 +696,37 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			p.cardActionMsgMu.Unlock()
 			p.registerThreadAliasFromRootAsync(chatID, messageID, sessionKey)
 		}
-		// Feishu uses native form checker for delete-mode toggle,
-		// so return a toast without calling cardNavHandler to avoid a full card refresh.
-		if strings.HasPrefix(actionVal, "act:/delete-mode toggle ") {
-			return &callback.CardActionTriggerResponse{
-				Toast: &callback.Toast{
-					Type:    "info",
-					Content: "已记录选择（Selection recorded）",
-				},
-			}, nil
-		}
 		if p.cardNavHandler != nil {
-			card := p.cardNavHandler(actionVal, sessionKey)
-			if card != nil {
+			done := make(chan *core.Card, 1)
+			go func() {
+				done <- p.cardNavHandler(actionVal, sessionKey)
+			}()
+			select {
+			case card := <-done:
+				if card != nil {
+					return &callback.CardActionTriggerResponse{
+						Card: &callback.Card{
+							Type: "raw",
+							Data: renderCardMap(card, sessionKey),
+						},
+					}, nil
+				}
+			case <-time.After(cardNavTimeout):
+				go func() {
+					card := <-done
+					if card == nil {
+						return
+					}
+					if refresher, ok := p.self.(core.CardRefresher); ok {
+						if err := refresher.RefreshCard(context.Background(), sessionKey, card); err != nil {
+							slog.Warn(p.tag()+": async card refresh failed", "action", actionVal, "err", err)
+						}
+					}
+				}()
 				return &callback.CardActionTriggerResponse{
-					Card: &callback.Card{
-						Type: "raw",
-						Data: renderCardMap(card, sessionKey),
+					Toast: &callback.Toast{
+						Type:    "info",
+						Content: "⏳ Loading... / 加载中...",
 					},
 				}, nil
 			}
@@ -876,6 +911,8 @@ func (p *Platform) AddDoneReaction(rctx any) {
 }
 
 const recalledMessageTTL = 10 * time.Minute
+
+const cardNavTimeout = 2500 * time.Millisecond
 
 func (p *Platform) markMessageRecalled(messageID string) {
 	messageID = strings.TrimSpace(messageID)
@@ -1162,9 +1199,16 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		sessionKey = aliasSessionKey
 	}
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, taskChat: isTaskChatGroup}
-	if namedSessionKey, namedReplyCtx, ok := p.createNamedCommandThreadIfNeeded(ctx, chatID, chatType, msgType, content, mentions, rootID, parentID, threadID); ok {
+	if namedSessionKey, namedReplyCtx, rewrittenContent, ok := p.createNamedCommandThreadIfNeeded(ctx, chatID, userID, chatType, msgType, content, mentions, rootID, parentID, threadID); ok {
+		slog.Info(p.tag()+": routing message into auto-created task chat", "origin_chat_id", chatID, "new_chat_id", namedReplyCtx.chatID, "original_session_key", sessionKey, "new_session_key", namedSessionKey, "rewritten_content", rewrittenContent)
 		sessionKey = namedSessionKey
 		rctx = namedReplyCtx
+		if strings.TrimSpace(namedReplyCtx.chatID) != "" {
+			chatID = namedReplyCtx.chatID
+		}
+		if rewrittenContent != "" {
+			content = rewrittenContent
+		}
 		parentID = ""
 	}
 	slog.Debug(p.tag()+": routed inbound message",
@@ -1221,17 +1265,27 @@ func (p *Platform) loadBotTaskChats() {
 		}
 		return
 	}
-	var raw map[string]int64
-	if err := json.Unmarshal(data, &raw); err != nil {
-		slog.Debug(p.tag()+": parse task chat store failed", "path", p.taskChatStorePath, "error", err)
-		return
+	var payload struct {
+		TaskChats        map[string]int64  `json:"task_chats"`
+		SessionTaskChats map[string]string `json:"session_task_chats"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		var raw map[string]int64
+		if legacyErr := json.Unmarshal(data, &raw); legacyErr != nil {
+			slog.Debug(p.tag()+": parse task chat store failed", "path", p.taskChatStorePath, "error", err)
+			return
+		}
+		payload.TaskChats = raw
 	}
 	now := time.Now()
 	p.botTaskChatMu.Lock()
 	if p.botTaskChatIDs == nil {
 		p.botTaskChatIDs = make(map[string]time.Time)
 	}
-	for chatID, unix := range raw {
+	if p.sessionTaskChats == nil {
+		p.sessionTaskChats = make(map[string]string)
+	}
+	for chatID, unix := range payload.TaskChats {
 		chatID = strings.TrimSpace(chatID)
 		if chatID == "" || unix <= 0 {
 			continue
@@ -1239,6 +1293,13 @@ func (p *Platform) loadBotTaskChats() {
 		createdAt := time.Unix(unix, 0)
 		if now.Sub(createdAt) <= botThreadRootTTL {
 			p.botTaskChatIDs[chatID] = createdAt
+		}
+	}
+	for sid, cid := range payload.SessionTaskChats {
+		sid = strings.TrimSpace(sid)
+		cid = strings.TrimSpace(cid)
+		if sid != "" && cid != "" {
+			p.sessionTaskChats[sid] = cid
 		}
 	}
 	p.botTaskChatMu.Unlock()
@@ -1250,12 +1311,25 @@ func (p *Platform) saveBotTaskChats(storePath string, chats map[string]time.Time
 	}
 	raw := make(map[string]int64, len(chats))
 	now := time.Now()
+	sessionTaskChats := map[string]string{}
+	p.botTaskChatMu.Lock()
+	for sid, cid := range p.sessionTaskChats {
+		sid = strings.TrimSpace(sid)
+		cid = strings.TrimSpace(cid)
+		if sid != "" && cid != "" {
+			sessionTaskChats[sid] = cid
+		}
+	}
+	p.botTaskChatMu.Unlock()
 	for chatID, createdAt := range chats {
 		if chatID != "" && now.Sub(createdAt) <= botThreadRootTTL {
 			raw[chatID] = createdAt.Unix()
 		}
 	}
-	data, err := json.MarshalIndent(raw, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{
+		"task_chats":         raw,
+		"session_task_chats": sessionTaskChats,
+	}, "", "  ")
 	if err != nil {
 		slog.Debug(p.tag()+": marshal task chat store failed", "error", err)
 		return
@@ -1267,6 +1341,108 @@ func (p *Platform) saveBotTaskChats(storePath string, chats map[string]time.Time
 	if err := core.AtomicWriteFile(storePath, data, 0o644); err != nil {
 		slog.Debug(p.tag()+": write task chat store failed", "path", storePath, "error", err)
 	}
+}
+
+func (p *Platform) setTaskChatPreviewHandle(chatID string, handle *feishuPreviewHandle) {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" || handle == nil {
+		return
+	}
+	p.botTaskChatMu.Lock()
+	if p.taskChatPreviewHandles == nil {
+		p.taskChatPreviewHandles = make(map[string]*feishuPreviewHandle)
+	}
+	p.taskChatPreviewHandles[chatID] = handle
+	p.botTaskChatMu.Unlock()
+}
+
+func (p *Platform) popTaskChatPreviewHandle(chatID string) *feishuPreviewHandle {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	p.botTaskChatMu.Lock()
+	defer p.botTaskChatMu.Unlock()
+	if p.taskChatPreviewHandles == nil {
+		return nil
+	}
+	handle := p.taskChatPreviewHandles[chatID]
+	if handle != nil {
+		delete(p.taskChatPreviewHandles, chatID)
+	}
+	return handle
+}
+
+func (p *Platform) clearTaskChatPreviewHandle(chatID string) {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return
+	}
+	p.botTaskChatMu.Lock()
+	if p.taskChatPreviewHandles != nil {
+		delete(p.taskChatPreviewHandles, chatID)
+	}
+	p.botTaskChatMu.Unlock()
+}
+
+func (p *Platform) bindSessionTaskChat(sessionID, chatID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	chatID = strings.TrimSpace(chatID)
+	if sessionID == "" || chatID == "" {
+		return
+	}
+	p.botTaskChatMu.Lock()
+	if p.sessionTaskChats == nil {
+		p.sessionTaskChats = make(map[string]string)
+	}
+	p.sessionTaskChats[sessionID] = chatID
+	snapshot := make(map[string]time.Time, len(p.botTaskChatIDs))
+	for id, createdAt := range p.botTaskChatIDs {
+		snapshot[id] = createdAt
+	}
+	storePath := p.taskChatStorePath
+	p.botTaskChatMu.Unlock()
+	p.saveBotTaskChats(storePath, snapshot)
+}
+
+func (p *Platform) BindSessionChat(_ context.Context, sessionID string, replyCtx any) error {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), replyCtx)
+	}
+	if !rc.taskChat {
+		return nil
+	}
+	chatID := strings.TrimSpace(rc.chatID)
+	if chatID == "" {
+		return nil
+	}
+	p.bindSessionTaskChat(sessionID, chatID)
+	return nil
+}
+
+func (p *Platform) popSessionTaskChat(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	p.botTaskChatMu.Lock()
+	if p.sessionTaskChats == nil {
+		p.botTaskChatMu.Unlock()
+		return ""
+	}
+	chatID := strings.TrimSpace(p.sessionTaskChats[sessionID])
+	if chatID != "" {
+		delete(p.sessionTaskChats, sessionID)
+	}
+	snapshot := make(map[string]time.Time, len(p.botTaskChatIDs))
+	for id, createdAt := range p.botTaskChatIDs {
+		snapshot[id] = createdAt
+	}
+	storePath := p.taskChatStorePath
+	p.botTaskChatMu.Unlock()
+	p.saveBotTaskChats(storePath, snapshot)
+	return chatID
 }
 
 func (p *Platform) isBotTaskChat(chatID string) bool {
@@ -1311,8 +1487,7 @@ func (p *Platform) isTaskChatGroup(chatID string) bool {
 }
 
 func isTaskChatTitle(name string) bool {
-	name = strings.TrimSpace(name)
-	return strings.HasPrefix(name, "[进行中]") || strings.HasPrefix(name, "[已完成]") || strings.HasPrefix(name, "[失败]")
+	return taskChatStatusFromTitle(name) != ""
 }
 
 func taskChatStorePath(dataDir, projectName, platformName, appID string) string {
@@ -3459,6 +3634,12 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
+	if p.isTaskChatGroup(chatID) {
+		return p.taskChatSessionKey(chatID, userID)
+	}
+	if p.shareSessionInChannel {
+		return fmt.Sprintf("%s:%s", p.tag(), chatID)
+	}
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
 		rootID := stringValue(msg.RootId)
 		if rootID == "" {
@@ -3471,10 +3652,14 @@ func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID strin
 			return fmt.Sprintf("%s:%s:root:%s", p.tag(), chatID, rootID)
 		}
 	}
-	if p.shareSessionInChannel {
-		return fmt.Sprintf("%s:%s", p.tag(), chatID)
-	}
 	return fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
+}
+
+func (p *Platform) taskChatSessionKey(chatID, _ string) string {
+	// Bot-created task/business groups are a collaboration space: everyone in
+	// the same group must talk to the same Codex session so short follow-ups
+	// like "1, 2" can resolve against the shared task context.
+	return fmt.Sprintf("%s:%s", p.tag(), chatID)
 }
 
 func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[string]any) string {
@@ -3510,11 +3695,104 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 	return !p.noReplyToTrigger
 }
 
-func (p *Platform) createNamedCommandThreadIfNeeded(ctx context.Context, chatID, chatType, msgType, content string, mentions []*larkim.MentionEvent, rootID, parentID, threadID string) (string, replyContext, bool) {
-	// Task isolation now uses dedicated Feishu groups instead of topics.
-	// Top-level commands stay in the current group/card flow unless the user
-	// explicitly clicks a card action that creates a task group.
-	return "", replyContext{}, false
+func (p *Platform) createNamedCommandThreadIfNeeded(ctx context.Context, chatID, userID, chatType, msgType, content string, mentions []*larkim.MentionEvent, rootID, parentID, threadID string) (string, replyContext, string, bool) {
+	if !p.threadIsolation {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "thread_isolation_disabled")
+		return "", replyContext{}, "", false
+	}
+	if strings.TrimSpace(chatType) != "p2p" {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "chat_type_not_p2p", "chat_type", strings.TrimSpace(chatType))
+		return "", replyContext{}, "", false
+	}
+	if strings.TrimSpace(msgType) != "text" {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "msg_type_not_text", "msg_type", strings.TrimSpace(msgType))
+		return "", replyContext{}, "", false
+	}
+	if strings.TrimSpace(chatID) == "" {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "chat_id_empty")
+		return "", replyContext{}, "", false
+	}
+
+	text, ok := parseTextMessageContent(content)
+	if !ok {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "parse_text_failed")
+		return "", replyContext{}, "", false
+	}
+	text = stripMentions(text, mentions, p.botOpenID)
+	commandText := strings.TrimSpace(text)
+	if commandText == "" || !strings.HasPrefix(commandText, "/") {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "not_command", "text", commandText)
+		return "", replyContext{}, "", false
+	}
+
+	fields := strings.Fields(commandText)
+	if len(fields) == 0 {
+		return "", replyContext{}, "", false
+	}
+	cmd := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	switch cmd {
+	case "new", "switch", "current":
+	default:
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "unsupported_command", "command", cmd)
+		return "", replyContext{}, "", false
+	}
+
+	if cmd == "current" && len(fields) > 1 {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "current_with_args", "command", commandText)
+		return "", replyContext{}, "", false
+	}
+
+	if strings.TrimSpace(rootID) != "" || strings.TrimSpace(parentID) != "" || strings.TrimSpace(threadID) != "" {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "thread_context_present", "root_id", strings.TrimSpace(rootID), "parent_id", strings.TrimSpace(parentID), "thread_id", strings.TrimSpace(threadID))
+		return "", replyContext{}, "", false
+	}
+
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		slog.Info(p.tag()+": auto task chat bypassed", "reason", "user_id_empty")
+		return "", replyContext{}, "", false
+	}
+
+	var title string
+	rewrittenCommand := commandText
+	switch cmd {
+	case "new":
+		title = buildActionTaskChatTitle("thread_new_session", commandText, map[string]any{})
+		if len(fields) > 1 {
+			rewrittenCommand = strings.TrimSpace(strings.Join(fields[1:], " "))
+		}
+	case "current":
+		title = buildActionTaskChatTitle("thread_current_session", commandText, map[string]any{})
+	case "switch":
+		switchArg := commandArgument(commandText)
+		title = buildActionTaskChatTitle("thread_switch_session", commandText, map[string]any{"session_name": switchArg})
+	}
+
+	newChatID, err := p.createTaskChat(ctx, userID, title)
+	if err != nil {
+		slog.Error(p.tag()+": create task chat for direct command failed", "command", commandText, "user_id", userID, "error", err)
+		return "", replyContext{}, "", false
+	}
+
+	newSessionKey := p.taskChatSessionKey(newChatID, userID)
+	slog.Info(p.tag()+": auto task chat created", "command", commandText, "rewritten_command", rewrittenCommand, "new_chat_id", newChatID, "new_session_key", newSessionKey)
+	originReplyCtx := replyContext{messageID: "", chatID: chatID, sessionKey: fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)}
+	taskReplyCtx := replyContext{messageID: "", chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
+	if err := p.Send(ctx, originReplyCtx, "已创建任务群，正在处理中，请到新群查看进度。"); err != nil {
+		slog.Warn(p.tag()+": failed to send p2p ack for auto task chat", "chat_id", chatID, "error", err)
+	}
+	if handleAny, err := p.SendPreviewStart(ctx, taskReplyCtx, "任务已接收，正在处理中，请稍候。"); err != nil {
+		slog.Warn(p.tag()+": failed to send task chat processing preview", "chat_id", newChatID, "error", err)
+	} else if handle, ok := handleAny.(*feishuPreviewHandle); ok {
+		p.setTaskChatPreviewHandle(newChatID, handle)
+	}
+	if cmd == "current" {
+		originSessionKey := fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
+		if p.sessionAliasHook != nil {
+			p.sessionAliasHook(newSessionKey, originSessionKey)
+		}
+	}
+	return newSessionKey, taskReplyCtx, fmt.Sprintf("{\"text\":%q}", rewrittenCommand), true
 }
 
 func parseTextMessageContent(content string) (string, bool) {
@@ -3699,7 +3977,8 @@ func commandArgument(command string) string {
 }
 
 func taskChatTitle(status, title string) string {
-	title = stripTaskChatStatus(sanitizeThreadTitle(title))
+	title = core.AbbreviateTaskTitle(stripTaskChatStatus(sanitizeThreadTitle(title)), 20)
+	title = stripTaskChatTitleEllipsis(title)
 	if title == "" {
 		title = "等待任务"
 	}
@@ -3707,16 +3986,68 @@ func taskChatTitle(status, title string) string {
 	if status == "" {
 		status = "进行中"
 	}
-	return truncateThreadTitle("["+status+"]"+title, 64)
+	return truncateThreadTitle(taskChatStatusPrefix(status)+title, 64)
 }
 
 func stripTaskChatStatus(title string) string {
 	title = strings.TrimSpace(title)
+	title = stripTaskChatStatusIcon(title)
 	if strings.HasPrefix(title, "[") {
 		if idx := strings.Index(title, "]"); idx >= 0 {
 			return strings.TrimSpace(title[idx+1:])
 		}
 	}
+	return strings.TrimSpace(title)
+}
+
+func taskChatStatusFromTitle(title string) string {
+	title = strings.TrimSpace(title)
+	title = stripTaskChatStatusIcon(title)
+	switch {
+	case strings.HasPrefix(title, "[进行中]"):
+		return "进行中"
+	case strings.HasPrefix(title, "[已完成]"):
+		return "已完成"
+	case strings.HasPrefix(title, "[失败]"):
+		return "失败"
+	default:
+		return ""
+	}
+}
+
+func taskChatStatusIcon(status string) string {
+	switch strings.Trim(status, "[] ") {
+	case "进行中":
+		return "⏳"
+	case "已完成":
+		return "✅"
+	case "失败":
+		return "❌"
+	default:
+		return ""
+	}
+}
+
+func taskChatStatusPrefix(status string) string {
+	status = strings.Trim(status, "[] ")
+	if status == "" {
+		status = "进行中"
+	}
+	return taskChatStatusIcon(status) + "[" + status + "]"
+}
+
+func stripTaskChatStatusIcon(title string) string {
+	title = strings.TrimSpace(title)
+	for _, icon := range []string{"⏳", "✅", "❌", "🔄", "☑️", "✔️", "✖️", "🚧"} {
+		title = strings.TrimSpace(strings.TrimPrefix(title, icon))
+	}
+	return title
+}
+
+func stripTaskChatTitleEllipsis(title string) string {
+	title = strings.TrimSpace(title)
+	title = strings.TrimSuffix(title, "…")
+	title = strings.TrimSuffix(title, "...")
 	return strings.TrimSpace(title)
 }
 
@@ -3801,49 +4132,151 @@ func (p *Platform) createTaskChat(ctx context.Context, userID, title string) (st
 		return chatID, err
 	}
 
-	body := larkim.NewCreateChatReqBodyBuilder().
-		Name(title).
-		UserIdList([]string{userID}).
-		BotIdList([]string{p.appID}).
-		ChatMode("group").
-		ChatType("private").
-		GroupMessageType("chat").
-		JoinMessageVisibility("not_anyone").
-		LeaveMessageVisibility("not_anyone").
-		MembershipApproval("no_approval_required").
-		EditPermission("only_owner").
-		Build()
-	req := larkim.NewCreateChatReqBuilder().
-		UserIdType("open_id").
-		SetBotManager(true).
-		Uuid(fmt.Sprintf("%s-task-%s-%d", p.tag(), userID, time.Now().UnixNano())).
-		Body(body).
-		Build()
-	var chatID string
-	err := p.withTransientRetry(ctx, "create task chat", func() error {
-		return p.withFreshTenantAccessTokenRetry(ctx, "create task chat", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Chat.Create(ctx, req, options...)
+	type createTaskChatAttempt struct {
+		name             string
+		includeBotIDList bool
+		setBotManager    bool
+		minimal          bool
+	}
+
+	buildPayload := func(attempt createTaskChatAttempt) map[string]any {
+		payload := map[string]any{
+			"name":         title,
+			"user_id_list": []string{userID},
+			"chat_type":    "private",
+		}
+		if !attempt.minimal {
+			payload["chat_mode"] = "group"
+			payload["group_message_type"] = "chat"
+			payload["join_message_visibility"] = "not_anyone"
+			payload["leave_message_visibility"] = "not_anyone"
+			payload["membership_approval"] = "no_approval_required"
+			payload["edit_permission"] = "only_owner"
+		}
+		if attempt.includeBotIDList {
+			payload["bot_id_list"] = []string{p.appID}
+		}
+		return payload
+	}
+
+	attempts := []createTaskChatAttempt{
+		{name: "full", includeBotIDList: true, setBotManager: true},
+		{name: "without_set_bot_manager", includeBotIDList: true},
+		{name: "without_bot_fields"},
+		{name: "minimal", minimal: true},
+	}
+
+	var lastErr error
+	for idx, attempt := range attempts {
+		var chatID string
+		err := p.withTransientRetry(ctx, "create task chat", func() error {
+			token, err := p.fetchFreshTenantAccessToken(ctx)
 			if err != nil {
-				return fmt.Errorf("%s: create task chat api call: %w", p.tag(), err)
+				return fmt.Errorf("%s: create task chat attempt=%s fetch token: %w", p.tag(), attempt.name, err)
+			}
+
+			payloadBytes, err := json.Marshal(buildPayload(attempt))
+			if err != nil {
+				return fmt.Errorf("%s: create task chat attempt=%s marshal payload: %w", p.tag(), attempt.name, err)
+			}
+
+			baseURL := strings.TrimRight(p.domain, "/")
+			if baseURL == "" {
+				baseURL = strings.TrimRight(lark.FeishuBaseUrl, "/")
+			}
+			q := url.Values{}
+			q.Set("user_id_type", "open_id")
+			if attempt.setBotManager {
+				q.Set("set_bot_manager", "true")
+			}
+			reqURL := baseURL + "/open-apis/im/v1/chats?" + q.Encode()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(payloadBytes))
+			if err != nil {
+				return fmt.Errorf("%s: create task chat attempt=%s build request: %w", p.tag(), attempt.name, err)
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("%s: create task chat attempt=%s http request: %w", p.tag(), attempt.name, err)
+			}
+			defer resp.Body.Close()
+
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return fmt.Errorf("%s: create task chat attempt=%s read response: %w", p.tag(), attempt.name, readErr)
+			}
+
+			var apiResp struct {
+				Code int    `json:"code"`
+				Msg  string `json:"msg"`
+				Data struct {
+					ChatID string `json:"chat_id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(body, &apiResp); err != nil {
+				return fmt.Errorf("%s: create task chat attempt=%s parse response status=%d body=%s err=%w", p.tag(), attempt.name, resp.StatusCode, strings.TrimSpace(string(body)), err)
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 || apiResp.Code != 0 {
+				return fmt.Errorf("%s: create task chat attempt=%s failed status=%d code=%d msg=%s", p.tag(), attempt.name, resp.StatusCode, apiResp.Code, apiResp.Msg)
+			}
+			chatID = strings.TrimSpace(apiResp.Data.ChatID)
+			return nil
+		})
+		if err == nil {
+			if chatID == "" {
+				err = fmt.Errorf("%s: create task chat attempt=%s returned empty chat id", p.tag(), attempt.name)
+			} else {
+				if idx > 0 {
+					slog.Warn(p.tag()+": create task chat succeeded after fallback", "attempt", attempt.name, "user_id", userID)
+				}
+				p.markBotTaskChat(chatID)
+				p.chatNameCache.Store(chatID, title)
+				return chatID, nil
+			}
+		}
+		lastErr = err
+		if !isCreateTaskChatFieldValidationErr(err) || idx == len(attempts)-1 {
+			return "", err
+		}
+		slog.Warn(p.tag()+": create task chat field validation failed, retrying with fallback request", "attempt", attempt.name, "next_attempt", attempts[idx+1].name, "error", err)
+	}
+
+	return "", lastErr
+}
+
+func isCreateTaskChatFieldValidationErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "code=99992402") || strings.Contains(strings.ToLower(msg), "field validation failed")
+}
+
+func (p *Platform) DeleteSessionChat(ctx context.Context, sessionID string) error {
+	chatID := p.popSessionTaskChat(sessionID)
+	if chatID == "" {
+		return nil
+	}
+	if p.deleteTaskChatHook != nil {
+		return p.deleteTaskChatHook(ctx, chatID)
+	}
+	req := larkim.NewDeleteChatReqBuilder().
+		ChatId(chatID).
+		Build()
+	return p.withTransientRetry(ctx, "delete task chat", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "delete task chat", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Chat.Delete(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: delete task chat api call: %w", p.tag(), err)
 			}
 			if !resp.Success() {
-				return fmt.Errorf("%s: create task chat failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-			}
-			if resp.Data != nil && resp.Data.ChatId != nil {
-				chatID = *resp.Data.ChatId
+				return fmt.Errorf("%s: delete task chat failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
 			return nil
 		})
 	})
-	if err != nil {
-		return "", err
-	}
-	if chatID == "" {
-		return "", fmt.Errorf("%s: create task chat returned empty chat id", p.tag())
-	}
-	p.markBotTaskChat(chatID)
-	p.chatNameCache.Store(chatID, title)
-	return chatID, nil
 }
 
 func (p *Platform) updateTaskChatTitle(ctx context.Context, chatID, title string) error {
@@ -3851,7 +4284,11 @@ func (p *Platform) updateTaskChatTitle(ctx context.Context, chatID, title string
 	if chatID == "" {
 		return fmt.Errorf("%s: chatID is empty, cannot update task chat title", p.tag())
 	}
-	title = truncateThreadTitle(sanitizeThreadTitle(title), 64)
+	if status := taskChatStatusFromTitle(title); status != "" {
+		title = taskChatTitle(status, stripTaskChatStatus(title))
+	} else {
+		title = taskChatTitle("进行中", title)
+	}
 	if title == "" {
 		return nil
 	}
@@ -4616,6 +5053,9 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if !p.useInteractiveCard {
 		return nil, core.ErrNotSupported
 	}
+	if p.sendPreviewStartHook != nil {
+		return p.sendPreviewStartHook(ctx, rctx, content)
+	}
 
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -4704,6 +5144,28 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	return &feishuPreviewHandle{messageID: msgID, chatID: chatID}, nil
 }
 
+func (p *Platform) FinalizeTaskChatPreview(ctx context.Context, rctx any, content string, status core.CardStatus) (bool, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return false, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if !rc.taskChat {
+		return false, nil
+	}
+	handle := p.popTaskChatPreviewHandle(rc.chatID)
+	if handle == nil {
+		return false, nil
+	}
+	if err := p.UpdateMessage(ctx, handle, content); err != nil {
+		p.clearTaskChatPreviewHandle(rc.chatID)
+		return false, err
+	}
+	if status != "" {
+		p.SetPreviewStatus(handle, status)
+	}
+	return true, nil
+}
+
 func (p *Platform) UpdateConversationTopic(ctx context.Context, rctx any, title string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -4772,6 +5234,9 @@ func (p *Platform) updateTextMessage(ctx context.Context, messageID, content str
 func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
 	if !p.useInteractiveCard {
 		return core.ErrNotSupported
+	}
+	if p.updateMessageHook != nil {
+		return p.updateMessageHook(ctx, previewHandle, content)
 	}
 
 	h, ok := previewHandle.(*feishuPreviewHandle)
@@ -4850,6 +5315,7 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 	if !ok {
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
+	p.clearTaskChatPreviewHandle(h.chatID)
 
 	req := larkim.NewDeleteMessageReqBuilder().
 		MessageId(h.messageID).
@@ -5200,6 +5666,40 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	return string(b)
 }
 
+func cardTemplateForStatus(status core.CardStatus) string {
+	switch status {
+	case core.CardStatusWorking, core.CardStatusThinking:
+		return "blue"
+	case core.CardStatusDone:
+		return "green"
+	case core.CardStatusError:
+		return "red"
+	default:
+		return "grey"
+	}
+}
+
+func applyStatusToCardJSON(cardJSON string, status core.CardStatus) string {
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		return buildCardJSONWithStatus(cardJSON, status)
+	}
+	header, _ := card["header"].(map[string]any)
+	if header == nil {
+		header = map[string]any{}
+	}
+	header["template"] = cardTemplateForStatus(status)
+	if _, ok := header["title"]; !ok {
+		header["title"] = map[string]any{"tag": "plain_text", "content": ""}
+	}
+	card["header"] = header
+	b, err := json.Marshal(card)
+	if err != nil {
+		return buildCardJSONWithStatus(cardJSON, status)
+	}
+	return string(b)
+}
+
 // formatElapsedCN renders a human-readable duration in Chinese.
 // Examples: "3.2 秒", "1 分 23 秒", "1 小时 05 分"。
 func formatElapsedCN(d time.Duration) string {
@@ -5452,7 +5952,12 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if lastContent == "" {
 		return
 	}
-	cardJSON := buildCardJSONWithStatus(lastContent, status)
+	cardJSON := lastContent
+	if isCardJSON(lastContent) {
+		cardJSON = applyStatusToCardJSON(lastContent, status)
+	} else {
+		cardJSON = buildCardJSONWithStatus(lastContent, status)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

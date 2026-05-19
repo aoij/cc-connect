@@ -2258,6 +2258,28 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 	}
 }
 
+func seedTaskTopicStateFromChatName(state *interactiveState, chatName string) {
+	if state == nil {
+		return
+	}
+	status := taskTopicStatusFromTitle(chatName)
+	if status == "" {
+		return
+	}
+	base := AbbreviateTaskTitle(stripTaskTopicStatus(chatName), 24)
+	if base == "" {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.taskTitle == "" {
+		state.taskTitle = formatTaskTopicTitle(status, base)
+	}
+	if state.topicStatus == "" {
+		state.topicStatus = status
+	}
+}
+
 func (e *Engine) updateConversationTopic(state *interactiveState, replyCtx any, status, userText string) {
 	if state == nil {
 		return
@@ -2286,13 +2308,20 @@ func (e *Engine) updateConversationTopic(state *interactiveState, replyCtx any, 
 }
 
 func taskTopicTitle(status, userText, previousTitle string) string {
-	summary := summarizeTaskTitle(userText, 28)
-	if summary == "" {
-		summary = stripTaskTopicStatus(previousTitle)
+	summary := AbbreviateTaskTitle(stripTaskTopicStatus(previousTitle), 24)
+	if summary == "" || isGenericTaskTopicBase(summary) {
+		candidate := AbbreviateTaskTitle(userText, 24)
+		if candidate != "" {
+			summary = candidate
+		}
 	}
 	if summary == "" {
 		summary = "等待任务"
 	}
+	return formatTaskTopicTitle(status, summary)
+}
+
+func formatTaskTopicTitle(status, summary string) string {
 	switch status {
 	case "running":
 		return "[进行中]" + summary
@@ -2305,14 +2334,137 @@ func taskTopicTitle(status, userText, previousTitle string) string {
 	}
 }
 
+func taskTopicStatusFromTitle(title string) string {
+	title = strings.TrimSpace(title)
+	title = stripTaskTopicStatusIcon(title)
+	switch {
+	case strings.HasPrefix(title, "[进行中]"):
+		return "running"
+	case strings.HasPrefix(title, "[已完成]"):
+		return "done"
+	case strings.HasPrefix(title, "[失败]"):
+		return "failed"
+	default:
+		return ""
+	}
+}
+
 func stripTaskTopicStatus(title string) string {
 	title = strings.TrimSpace(title)
+	title = stripTaskTopicStatusIcon(title)
 	for _, prefix := range []string{"[进行中]", "[已完成]", "[失败]"} {
 		if strings.HasPrefix(title, prefix) {
 			return strings.TrimSpace(strings.TrimPrefix(title, prefix))
 		}
 	}
 	return title
+}
+
+func stripTaskTopicStatusIcon(title string) string {
+	title = strings.TrimSpace(title)
+	for _, icon := range []string{"⏳", "✅", "❌", "🔄", "☑️", "✔️", "✖️", "🚧"} {
+		title = strings.TrimSpace(strings.TrimPrefix(title, icon))
+	}
+	return title
+}
+
+func AbbreviateTaskTitle(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = stripTaskTopicStatus(text)
+	text = strings.ReplaceAll(text, "\r", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.Join(strings.Fields(text), " ")
+
+	if idx := strings.IndexAny(text, "，,。；;！!？?|｜"); idx >= 0 {
+		head := strings.TrimSpace(text[:idx])
+		if head != "" {
+			text = head
+		}
+	}
+
+	replacer := strings.NewReplacer(
+		"分析下", "分析",
+		"分析一下", "分析",
+		"看下", "查看",
+		"看一下", "查看",
+		"处理下", "处理",
+		"处理一下", "处理",
+		"优化下", "优化",
+		"优化一下", "优化",
+		"排查下", "排查",
+		"排查一下", "排查",
+		"调一下", "调试",
+		"调试下", "调试",
+		"修一下", "修复",
+		"修复下", "修复",
+		"一下", "",
+		"当前项目", "项目",
+		"项目部署的这个服务", "项目部署服务",
+		"项目部署的服务", "项目部署服务",
+		"部署的服务", "部署服务",
+		"这个服务", "服务",
+		"该服务", "服务",
+		"项目部署的", "项目部署",
+		"部署的服务", "部署服务",
+	)
+	text = replacer.Replace(text)
+	for _, pair := range [][2]string{
+		{"项目部署的这个服务", "项目部署服务"},
+		{"项目部署的服务", "项目部署服务"},
+		{"部署的这个服务", "部署服务"},
+		{"部署的服务", "部署服务"},
+		{"当前项目", "项目"},
+		{"这个服务", "服务"},
+		{"该服务", "服务"},
+		{"分析项目部署服务", "分析项目部署服务"},
+	} {
+		text = strings.ReplaceAll(text, pair[0], pair[1])
+	}
+	for _, prefix := range []string{"帮我", "帮忙", "请", "麻烦", "直接", "继续", "再", "然后", "把", "将", "使用", "用", "通过", "利用"} {
+		for strings.HasPrefix(text, prefix) {
+			text = strings.TrimSpace(strings.TrimPrefix(text, prefix))
+		}
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	for _, prefix := range []string{"查看 ", "分析 ", "处理 ", "排查 ", "修复 ", "优化 ", "调试 "} {
+		if strings.HasPrefix(text, prefix) {
+			rest := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+			compact := strings.ReplaceAll(rest, " ", "")
+			reQuestion := regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._:-]{1,})(处理完成了吗|完成了吗|好了没|怎么样了)$`)
+			if m := reQuestion.FindStringSubmatch(compact); len(m) == 3 {
+				text = m[1]
+				break
+			}
+		}
+	}
+	text = strings.Trim(text, "`*_#> -—:：，,。.!！?？/\\|[]()（）{}《》")
+	if text == "" {
+		return ""
+	}
+	if lead, ok := leadingTaskEntity(text); ok {
+		text = lead
+	} else {
+		compact := strings.ReplaceAll(text, " ", "")
+		reQuestion := regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._:-]{1,})(处理完成了吗|完成了吗|好了没|怎么样了)$`)
+		if m := reQuestion.FindStringSubmatch(compact); len(m) == 3 {
+			text = m[1]
+		}
+	}
+	runes := []rune(text)
+	if maxRunes <= 0 || len(runes) <= maxRunes {
+		return text
+	}
+	cut := maxRunes
+	for i := maxRunes; i > maxRunes/2; i-- {
+		if runes[i-1] == ' ' {
+			cut = i - 1
+			break
+		}
+	}
+	return strings.TrimSpace(string(runes[:cut])) + "…"
 }
 
 func summarizeTaskTitle(text string, maxRunes int) string {
@@ -2332,6 +2484,42 @@ func summarizeTaskTitle(text string, maxRunes int) string {
 		return text
 	}
 	return string(runes[:maxRunes]) + "…"
+}
+
+func isGenericTaskTopicBase(title string) bool {
+	title = strings.TrimSpace(stripTaskTopicStatus(title))
+	switch title {
+	case "", "等待任务", "当前会话", "会话", "新建会话", "切换会话", "会话处理", "命令", "处理中的任务", "处理中任务", "当前处理的进度":
+		return true
+	}
+	if strings.HasPrefix(title, "会话") && len([]rune(title)) <= 12 {
+		return true
+	}
+	return false
+}
+
+func leadingTaskEntity(text string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) < 2 {
+		return "", false
+	}
+	lead := strings.TrimSpace(fields[0])
+	if lead == "" {
+		return "", false
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{1,}$`).MatchString(lead) {
+		return "", false
+	}
+	rest := strings.TrimSpace(strings.Join(fields[1:], " "))
+	if rest == "" {
+		return lead, true
+	}
+	for _, prefix := range []string{"分析", "查看", "排查", "修复", "处理", "优化", "部署", "搜索", "查询", "当前", "进度", "完成", "代码", "服务", "接口", "分支", "github", "git", "会话", "任务"} {
+		if strings.HasPrefix(rest, prefix) {
+			return lead, true
+		}
+	}
+	return "", false
 }
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
@@ -2669,6 +2857,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
 	state.mu.Unlock()
+	seedTaskTopicStateFromChatName(state, msg.ChatName)
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
@@ -3041,6 +3230,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				sessions.SetSessionName(newID, pendingName)
 			}
 			sessions.Save()
+		}
+		if binder, ok := p.(SessionChatBinder); ok && binder != nil && replyCtx != nil {
+			if err := binder.BindSessionChat(e.ctx, newID, replyCtx); err != nil {
+				slog.Debug("session chat bind failed", "platform", p.Name(), "session_id", newID, "error", err)
+			}
 		}
 	}
 
@@ -4352,10 +4546,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Debug("EventResult: suppressed prefix duplicate final text", "response_len", len(fullResponse))
 			} else {
 				resultTopicStatus = "done"
-				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
-				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-						return
+				finalizedTaskPreview := false
+				if finalizer, ok := p.(TaskChatPreviewFinalizer); ok {
+					if handled, err := finalizer.FinalizeTaskChatPreview(e.ctx, replyCtx, fullResponse, CardStatusDone); err != nil {
+						slog.Debug("task chat preview finalize failed", "platform", p.Name(), "error", err)
+					} else if handled {
+						finalizedTaskPreview = true
+					}
+				}
+				if !finalizedTaskPreview {
+					slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "chunks", len(splitMessage(fullResponse, maxPlatformMessageLen)))
+					for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
 					}
 				}
 			}
@@ -4554,7 +4758,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						break
 					}
 				}
-				e.send(p, replyCtx, userMsg)
+				finalizedTaskPreview := false
+				if finalizer, ok := p.(TaskChatPreviewFinalizer); ok {
+					if handled, err := finalizer.FinalizeTaskChatPreview(e.ctx, replyCtx, userMsg, CardStatusError); err != nil {
+						slog.Debug("task chat preview finalize failed on error", "platform", p.Name(), "error", err)
+					} else if handled {
+						finalizedTaskPreview = true
+					}
+				}
+				if !finalizedTaskPreview {
+					e.send(p, replyCtx, userMsg)
+				}
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -4617,9 +4831,19 @@ channelClosed:
 				}
 			}
 		} else {
-			for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
-				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
-					return
+			finalizedTaskPreview := false
+			if finalizer, ok := p.(TaskChatPreviewFinalizer); ok {
+				if handled, err := finalizer.FinalizeTaskChatPreview(e.ctx, replyCtx, fullResponse, CardStatusDone); err != nil {
+					slog.Debug("task chat preview finalize failed on channel closed", "platform", p.Name(), "error", err)
+				} else if handled {
+					finalizedTaskPreview = true
+				}
+			}
+			if !finalizedTaskPreview {
+				for _, chunk := range splitMessage(fullResponse, maxPlatformMessageLen) {
+					if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+						return
+					}
 				}
 			}
 		}
@@ -10435,7 +10659,18 @@ func (e *Engine) deleteOneSessionByQuery(sessionKey, query string) string {
 	if matched == nil {
 		return fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query)
 	}
-	return e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, matched)
+	platformName := extractPlatformName(sessionKey)
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil && len(e.platforms) > 0 {
+		targetPlatform = e.platforms[0]
+	}
+	return e.deleteSingleSessionReply(targetPlatform, &Message{SessionKey: sessionKey}, deleter, matched)
 }
 
 func parseDeleteModeSelectedIDs(args []string) map[string]struct{} {
@@ -10463,6 +10698,17 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	platformName := extractPlatformName(sessionKey)
+	var targetPlatform Platform
+	for _, p := range e.platforms {
+		if p.Name() == platformName {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil && len(e.platforms) > 0 {
+		targetPlatform = e.platforms[0]
+	}
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(selectedIDs))
 	for i := range agentSessions {
@@ -10470,7 +10716,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 		if _, ok := selectedIDs[agentSessions[i].ID]; !ok {
 			continue
 		}
-		if line := e.deleteSingleSessionReply(&Message{SessionKey: sessionKey}, deleter, &agentSessions[i]); line != "" {
+		if line := e.deleteSingleSessionReply(targetPlatform, &Message{SessionKey: sessionKey}, deleter, &agentSessions[i]); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -10727,10 +10973,14 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		switchExtra := map[string]string{
 			"action_mode":   "thread_switch_current",
 			"session_title": displayName,
+			"session_id":    s.ID,
+			"session_name":  displayName,
 		}
 		newThreadExtra := map[string]string{
 			"action_mode":   "thread_switch_session",
 			"session_title": displayName,
+			"session_id":    s.ID,
+			"session_name":  displayName,
 		}
 		if s.ID == activeAgentID {
 			switchExtra["action_mode"] = "thread_switch_current"
@@ -10889,7 +11139,8 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 	_, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
-	agentID := s.GetAgentSessionID()
+	rawAgentID := s.GetAgentSessionID()
+	agentID := rawAgentID
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
 	}
@@ -10909,6 +11160,7 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 				"action_mode":   "thread_current_session",
 				"session_title": sessionTitle,
 				"session_name":  sessionTitle,
+				"session_id":    rawAgentID,
 			}},
 			CardButton{Text: "新建会话群", Type: "default", Value: "act:/new", Extra: map[string]string{
 				"action_mode":  "thread_new_session",
@@ -12877,7 +13129,7 @@ func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter
 	lines := make([]string, 0, len(indices))
 	for _, idx := range indices {
 		matched := &sessions[idx-1]
-		if line := e.deleteSingleSessionReply(msg, deleter, matched); line != "" {
+		if line := e.deleteSingleSessionReply(p, msg, deleter, matched); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -12889,10 +13141,10 @@ func (e *Engine) cmdDeleteBatch(p Platform, msg *Message, deleter SessionDeleter
 }
 
 func (e *Engine) deleteSingleSession(p Platform, msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) {
-	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(msg, deleter, matched))
+	e.reply(p, msg.ReplyCtx, e.deleteSingleSessionReply(p, msg, deleter, matched))
 }
 
-func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) string {
+func (e *Engine) deleteSingleSessionReply(p Platform, msg *Message, deleter SessionDeleter, matched *AgentSessionInfo) string {
 	if matched == nil {
 		return ""
 	}
@@ -12908,6 +13160,11 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 
 	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
 		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
+	}
+	if cleanup, ok := p.(SessionChatCleanup); ok && cleanup != nil {
+		if err := cleanup.DeleteSessionChat(e.ctx, matched.ID); err != nil {
+			slog.Warn("session chat cleanup failed", "session_id", matched.ID, "platform", p.Name(), "error", err)
+		}
 	}
 
 	// Keep local session snapshot aligned with agent-side deletion.
