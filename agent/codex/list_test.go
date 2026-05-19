@@ -88,7 +88,7 @@ func TestListCodexSessions_UsesCodexAppStateThreads(t *testing.T) {
 	}
 }
 
-func TestListCodexSessions_FiltersToCodexSidebarThreadsWhenPresent(t *testing.T) {
+func TestListCodexSessions_DoesNotFilterByHeartbeatPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	codexHome := filepath.Join(tmpDir, ".codex")
 	workDir := filepath.Join(tmpDir, "project")
@@ -108,8 +108,11 @@ func TestListCodexSessions_FiltersToCodexSidebarThreadsWhenPresent(t *testing.T)
 	if err != nil {
 		t.Fatalf("listCodexSessions() error = %v", err)
 	}
-	if len(got) != 1 || got[0].ID != "session-visible" {
-		t.Fatalf("listCodexSessions() = %#v, want only session-visible", got)
+	if len(got) != 2 {
+		t.Fatalf("listCodexSessions() len = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].ID != "session-hidden" || got[1].ID != "session-visible" {
+		t.Fatalf("listCodexSessions() = %#v, want all state DB threads ordered by updated time", got)
 	}
 }
 

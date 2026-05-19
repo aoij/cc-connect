@@ -109,8 +109,6 @@ func listCodexAppThreads(workDir, codexHome string) ([]core.AgentSessionInfo, bo
 		return nil, true, fmt.Errorf("open codex state db: %w", err)
 	}
 	defer db.Close()
-	sidebarThreadIDs := loadCodexSidebarThreadIDs(codexHome)
-
 	rows, err := db.Query(`
 select id, rollout_path, cwd, title, first_user_message, preview, coalesce(git_branch, ''),
        updated_at, coalesce(updated_at_ms, 0)
@@ -141,11 +139,6 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 		}
 		if !sameCodexWorkDir(row.Cwd, workDir) {
 			continue
-		}
-		if len(sidebarThreadIDs) > 0 {
-			if _, ok := sidebarThreadIDs[row.ID]; !ok {
-				continue
-			}
 		}
 		if !fileExists(row.RolloutPath) {
 			continue
