@@ -2339,6 +2339,46 @@ func TestTaskChatStorePersistsBotCreatedGroups(t *testing.T) {
 	}
 }
 
+func TestListActiveSessionChatsReturnsPersistedRunningGroups(t *testing.T) {
+	dir := t.TempDir()
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"cc_data_dir":        dir,
+		"cc_project":         "trade_cloud-codex",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	ip.markBotTaskChat("oc_task_chat")
+	ip.chatNameCache.Store("oc_task_chat", "⏳[进行中]chatgpt2api")
+	ip.bindSessionTaskChat("agent-session-1", "oc_task_chat")
+
+	reloadedAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"cc_data_dir":        dir,
+		"cc_project":         "trade_cloud-codex",
+	})
+	if err != nil {
+		t.Fatalf("New() reload error = %v", err)
+	}
+	reloaded := reloadedAny.(*interactivePlatform)
+	items, err := reloaded.ListActiveSessionChats(context.Background())
+	if err != nil {
+		t.Fatalf("ListActiveSessionChats() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("active chats len = %d, want 1: %+v", len(items), items)
+	}
+	if items[0].SessionID != "agent-session-1" || items[0].ChatID != "oc_task_chat" || !strings.Contains(items[0].Title, "chatgpt2api") {
+		t.Fatalf("active chat = %+v, want persisted running chatgpt2api", items[0])
+	}
+}
+
 func TestResolveMentions_LongestMatchFirst(t *testing.T) {
 	p := &Platform{platformName: "feishu", resolveMentions: true}
 	p.chatMemberCache.Store("oc_chat", &chatMemberEntry{

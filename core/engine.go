@@ -7798,6 +7798,7 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 
 	var items []activeTaskItem
 	seenSessionID := make(map[string]struct{})
+	seenAgentID := make(map[string]struct{})
 	for _, state := range stateSnapshot {
 		if state == nil {
 			continue
@@ -7835,6 +7836,9 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 			continue
 		}
 		seenSessionID[sessionID] = struct{}{}
+		if agentID != "" {
+			seenAgentID[agentID] = struct{}{}
+		}
 
 		items = append(items, activeTaskItem{
 			sessionID:    sessionID,
@@ -7849,6 +7853,56 @@ func (e *Engine) renderActiveTasksCard(sessionKey string) *Card {
 			updatedAt:    sess.GetUpdatedAt(),
 			active:       sessionID == activeID,
 		})
+	}
+
+	for _, p := range e.platforms {
+		lister, ok := p.(ActiveSessionChatLister)
+		if !ok || lister == nil {
+			continue
+		}
+		chats, err := lister.ListActiveSessionChats(e.ctx)
+		if err != nil {
+			slog.Debug("active task chat list failed", "platform", p.Name(), "error", err)
+			continue
+		}
+		for _, chat := range chats {
+			agentID := strings.TrimSpace(chat.SessionID)
+			if agentID == "" {
+				continue
+			}
+			if _, exists := seenAgentID[agentID]; exists {
+				continue
+			}
+			sess := sessionByAgentID[agentID]
+			sessionID := ""
+			sessionName := ""
+			sessionUpdatedAt := time.Time{}
+			if sess != nil {
+				sessionID = strings.TrimSpace(sess.ID)
+				sessionName = strings.TrimSpace(sess.GetName())
+				sessionUpdatedAt = sess.GetUpdatedAt()
+			} else {
+				sessionID = "platform:" + agentID
+			}
+			if _, exists := seenSessionID[sessionID]; exists {
+				continue
+			}
+			seenAgentID[agentID] = struct{}{}
+			seenSessionID[sessionID] = struct{}{}
+			updatedAt := chat.UpdatedAt
+			if updatedAt.IsZero() {
+				updatedAt = sessionUpdatedAt
+			}
+			items = append(items, activeTaskItem{
+				sessionID: sessionID,
+				agentID:   agentID,
+				name:      sessionName,
+				taskTitle: strings.TrimSpace(chat.Title),
+				chatName:  strings.TrimSpace(chat.Title),
+				updatedAt: updatedAt,
+				active:    sessionID == activeID,
+			})
+		}
 	}
 
 	sort.Slice(items, func(i, j int) bool {

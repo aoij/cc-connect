@@ -207,6 +207,23 @@ type SessionChatBinder interface {
 	BindSessionChat(ctx context.Context, sessionID string, replyCtx any) error
 }
 
+// ActiveSessionChatLister is implemented by platforms that persist
+// platform-side task chats/groups whose visual state is still in-progress.
+// It lets /tasks show task groups that survived a service restart even when
+// there is no in-memory interactive turn anymore.
+type ActiveSessionChatLister interface {
+	ListActiveSessionChats(ctx context.Context) ([]ActiveSessionChatInfo, error)
+}
+
+// ActiveSessionChatInfo describes a platform-side session/task chat that is
+// still visually marked as running.
+type ActiveSessionChatInfo struct {
+	SessionID string
+	ChatID    string
+	Title     string
+	UpdatedAt time.Time
+}
+
 // ProgressStyleProvider is an optional interface for platforms that expose
 // a preferred style for intermediate progress rendering.
 // Typical values: "legacy", "compact", "card".

@@ -57,6 +57,7 @@ type stubPlatformEngine struct {
 	boundSessionChats   []string
 	finalizedPreviews   []string
 	finalizeStatuses    []CardStatus
+	activeSessionChats  []ActiveSessionChatInfo
 }
 
 func (p *stubPlatformEngine) Name() string               { return p.n }
@@ -92,6 +93,13 @@ func (p *stubPlatformEngine) FinalizeTaskChatPreview(_ context.Context, _ any, c
 	p.finalizeStatuses = append(p.finalizeStatuses, status)
 	p.mu.Unlock()
 	return true, nil
+}
+func (p *stubPlatformEngine) ListActiveSessionChats(_ context.Context) ([]ActiveSessionChatInfo, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]ActiveSessionChatInfo, len(p.activeSessionChats))
+	copy(cp, p.activeSessionChats)
+	return cp, nil
 }
 
 func (p *stubPlatformEngine) getSent() []string {
@@ -5319,6 +5327,32 @@ func TestHandleCardNav_ActiveTasksUsesTaskTitle(t *testing.T) {
 	}
 	if strings.Contains(text, "**1. default**") {
 		t.Fatalf("tasks card text = %q, should not show generic default name", text)
+	}
+}
+
+func TestHandleCardNav_ActiveTasksIncludesPersistedTaskChats(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	p.activeSessionChats = []ActiveSessionChatInfo{{
+		SessionID: "agent-task-1",
+		ChatID:    "oc_task",
+		Title:     "⏳[进行中]chatgpt2api",
+		UpdatedAt: time.Date(2026, 5, 19, 12, 35, 0, 0, time.Local),
+	}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	sessionKey := "feishu:p2p"
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	s.SetAgentInfo("agent-task-1", "codex", "chatgpt2api")
+
+	card := e.handleCardNav("nav:/tasks", sessionKey)
+	if card == nil {
+		t.Fatal("expected active tasks card")
+	}
+	text := card.RenderText()
+	if !strings.Contains(text, "chatgpt2api") {
+		t.Fatalf("tasks card text = %q, want persisted task chat title", text)
+	}
+	if strings.Contains(text, "当前没有") || strings.Contains(text, "褰撳墠娌℃湁") {
+		t.Fatalf("tasks card text = %q, should not be empty", text)
 	}
 }
 

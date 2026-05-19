@@ -112,6 +112,8 @@ type replyContext struct {
 	chatID     string
 	sessionKey string
 	taskChat   bool
+	title      string
+	status     string
 }
 
 type Platform struct {
@@ -619,7 +621,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			if actionMode == "thread_current_session" && sessionKey != "" && p.sessionAliasHook != nil {
 				p.sessionAliasHook(newSessionKey, sessionKey)
 			}
-			newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
+			newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true, title: chatTitle, status: "进行中"}
 			if handleAny, err := p.SendPreviewStart(context.Background(), newReplyCtx, "任务已接收，正在处理中，请稍候。"); err != nil {
 				slog.Warn(p.tag()+": failed to send task chat processing preview", "chat_id", newChatID, "error", err)
 			} else if handle, ok := handleAny.(*feishuPreviewHandle); ok {
@@ -660,7 +662,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				}
 				newSessionKey := p.taskChatSessionKey(newChatID, userID)
 				p.bindSessionTaskChat(target, newChatID)
-				newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
+				newReplyCtx := replyContext{chatID: newChatID, sessionKey: newSessionKey, taskChat: true, title: chatTitle, status: "进行中"}
 				if handleAny, err := p.SendPreviewStart(context.Background(), newReplyCtx, "任务已接收，正在处理中，请稍候。"); err != nil {
 					slog.Warn(p.tag()+": failed to send task chat processing preview", "chat_id", newChatID, "error", err)
 				} else if handle, ok := handleAny.(*feishuPreviewHandle); ok {
@@ -1198,7 +1200,13 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if aliasSessionKey != "" {
 		sessionKey = aliasSessionKey
 	}
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, taskChat: isTaskChatGroup}
+	taskTitle := ""
+	taskStatus := ""
+	if isTaskChatGroup {
+		taskTitle = p.resolveChatName(chatID)
+		taskStatus = taskChatStatusFromTitle(taskTitle)
+	}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, taskChat: isTaskChatGroup, title: taskTitle, status: taskStatus}
 	if namedSessionKey, namedReplyCtx, rewrittenContent, ok := p.createNamedCommandThreadIfNeeded(ctx, chatID, userID, chatType, msgType, content, mentions, rootID, parentID, threadID); ok {
 		slog.Info(p.tag()+": routing message into auto-created task chat", "origin_chat_id", chatID, "new_chat_id", namedReplyCtx.chatID, "original_session_key", sessionKey, "new_session_key", namedSessionKey, "rewritten_content", rewrittenContent)
 		sessionKey = namedSessionKey
@@ -1268,6 +1276,7 @@ func (p *Platform) loadBotTaskChats() {
 	var payload struct {
 		TaskChats        map[string]int64  `json:"task_chats"`
 		SessionTaskChats map[string]string `json:"session_task_chats"`
+		TaskChatTitles   map[string]string `json:"task_chat_titles"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		var raw map[string]int64
@@ -1303,6 +1312,13 @@ func (p *Platform) loadBotTaskChats() {
 		}
 	}
 	p.botTaskChatMu.Unlock()
+	for chatID, title := range payload.TaskChatTitles {
+		chatID = strings.TrimSpace(chatID)
+		title = strings.TrimSpace(title)
+		if chatID != "" && title != "" {
+			p.chatNameCache.Store(chatID, title)
+		}
+	}
 }
 
 func (p *Platform) saveBotTaskChats(storePath string, chats map[string]time.Time) {
@@ -1312,6 +1328,7 @@ func (p *Platform) saveBotTaskChats(storePath string, chats map[string]time.Time
 	raw := make(map[string]int64, len(chats))
 	now := time.Now()
 	sessionTaskChats := map[string]string{}
+	taskChatTitles := map[string]string{}
 	p.botTaskChatMu.Lock()
 	for sid, cid := range p.sessionTaskChats {
 		sid = strings.TrimSpace(sid)
@@ -1324,11 +1341,17 @@ func (p *Platform) saveBotTaskChats(storePath string, chats map[string]time.Time
 	for chatID, createdAt := range chats {
 		if chatID != "" && now.Sub(createdAt) <= botThreadRootTTL {
 			raw[chatID] = createdAt.Unix()
+			if cached, ok := p.chatNameCache.Load(chatID); ok {
+				if title := strings.TrimSpace(cached.(string)); title != "" {
+					taskChatTitles[chatID] = title
+				}
+			}
 		}
 	}
 	data, err := json.MarshalIndent(map[string]any{
 		"task_chats":         raw,
 		"session_task_chats": sessionTaskChats,
+		"task_chat_titles":   taskChatTitles,
 	}, "", "  ")
 	if err != nil {
 		slog.Debug(p.tag()+": marshal task chat store failed", "error", err)
@@ -3777,7 +3800,7 @@ func (p *Platform) createNamedCommandThreadIfNeeded(ctx context.Context, chatID,
 	newSessionKey := p.taskChatSessionKey(newChatID, userID)
 	slog.Info(p.tag()+": auto task chat created", "command", commandText, "rewritten_command", rewrittenCommand, "new_chat_id", newChatID, "new_session_key", newSessionKey)
 	originReplyCtx := replyContext{messageID: "", chatID: chatID, sessionKey: fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)}
-	taskReplyCtx := replyContext{messageID: "", chatID: newChatID, sessionKey: newSessionKey, taskChat: true}
+	taskReplyCtx := replyContext{messageID: "", chatID: newChatID, sessionKey: newSessionKey, taskChat: true, title: title, status: "进行中"}
 	if err := p.Send(ctx, originReplyCtx, "已创建任务群，正在处理中，请到新群查看进度。"); err != nil {
 		slog.Warn(p.tag()+": failed to send p2p ack for auto task chat", "chat_id", chatID, "error", err)
 	}
@@ -4004,6 +4027,12 @@ func taskChatStatusFromTitle(title string) string {
 	title = strings.TrimSpace(title)
 	title = stripTaskChatStatusIcon(title)
 	switch {
+	case strings.HasPrefix(title, "[进行中]"):
+		return "进行中"
+	case strings.HasPrefix(title, "[已完成]"):
+		return "已完成"
+	case strings.HasPrefix(title, "[失败]"):
+		return "失败"
 	case strings.HasPrefix(title, "[进行中]"):
 		return "进行中"
 	case strings.HasPrefix(title, "[已完成]"):
@@ -4277,6 +4306,51 @@ func (p *Platform) DeleteSessionChat(ctx context.Context, sessionID string) erro
 			return nil
 		})
 	})
+}
+
+func (p *Platform) ListActiveSessionChats(_ context.Context) ([]core.ActiveSessionChatInfo, error) {
+	p.botTaskChatMu.Lock()
+	sessionTaskChats := make(map[string]string, len(p.sessionTaskChats))
+	for sid, cid := range p.sessionTaskChats {
+		sid = strings.TrimSpace(sid)
+		cid = strings.TrimSpace(cid)
+		if sid != "" && cid != "" {
+			sessionTaskChats[sid] = cid
+		}
+	}
+	taskChats := make(map[string]time.Time, len(p.botTaskChatIDs))
+	for cid, createdAt := range p.botTaskChatIDs {
+		cid = strings.TrimSpace(cid)
+		if cid != "" {
+			taskChats[cid] = createdAt
+		}
+	}
+	p.botTaskChatMu.Unlock()
+
+	var items []core.ActiveSessionChatInfo
+	for sid, chatID := range sessionTaskChats {
+		createdAt, ok := taskChats[chatID]
+		if !ok || time.Since(createdAt) > botThreadRootTTL {
+			continue
+		}
+		title := ""
+		if cached, ok := p.chatNameCache.Load(chatID); ok {
+			title = strings.TrimSpace(cached.(string))
+		}
+		if title == "" {
+			title = p.resolveChatName(chatID)
+		}
+		if taskChatStatusFromTitle(title) != "进行中" {
+			continue
+		}
+		items = append(items, core.ActiveSessionChatInfo{
+			SessionID: sid,
+			ChatID:    chatID,
+			Title:     title,
+			UpdatedAt: createdAt,
+		})
+	}
+	return items, nil
 }
 
 func (p *Platform) updateTaskChatTitle(ctx context.Context, chatID, title string) error {
