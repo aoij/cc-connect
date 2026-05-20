@@ -1746,6 +1746,19 @@ func findCardAction(card *Card, value string) (CardButton, bool) {
 	return CardButton{}, false
 }
 
+func findCardSelectOption(card *Card, value string) (CardSelectOption, bool) {
+	for _, elem := range card.Elements {
+		if sel, ok := elem.(CardSelect); ok {
+			for _, opt := range sel.Options {
+				if opt.Value == value {
+					return opt, true
+				}
+			}
+		}
+	}
+	return CardSelectOption{}, false
+}
+
 // --- alias tests ---
 
 func TestEngine_Alias(t *testing.T) {
@@ -7468,6 +7481,12 @@ func TestHandleCardNav_ModelSettingsUsesCompactModelLabels(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("model settings card text = %q, want %q", text, want)
 		}
+	}
+	if opt, ok := findCardSelectOption(card, "act:/model switch 1"); !ok || opt.Text != "GPT-5.5" {
+		t.Fatalf("first model select option = %#v ok=%v, want GPT-5.5", opt, ok)
+	}
+	if btn, ok := findCardAction(card, "act:/model switch 2"); !ok || btn.Text != "GPT-5.4" {
+		t.Fatalf("second model quick button = %#v ok=%v, want GPT-5.4", btn, ok)
 	}
 }
 

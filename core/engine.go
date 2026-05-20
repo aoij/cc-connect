@@ -10946,6 +10946,13 @@ func modelSelectLabel(m ModelOption, maxRunes int) string {
 	return string(runes[:maxRunes-1]) + "…"
 }
 
+func modelActionLabel(m ModelOption) string {
+	if label := modelSelectLabel(m, 0); label != "" {
+		return label
+	}
+	return strings.TrimSpace(m.Name)
+}
+
 func codexStyleModelLabel(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "gpt-5.5":
@@ -11003,8 +11010,26 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleModel), "indigo").
 		Markdown(sb.String()).
-		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
-		Buttons(e.cardBackButton())
+		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal)
+	if len(models) > 0 {
+		for i := 0; i < len(models); i += 2 {
+			end := i + 2
+			if end > len(models) {
+				end = len(models)
+			}
+			var row []CardButton
+			for j := i; j < end; j++ {
+				m := models[j]
+				label := modelActionLabel(m)
+				if m.Name == current {
+					label = "✓ " + label
+				}
+				row = append(row, DefaultBtn(label, fmt.Sprintf("act:/model switch %d", j+1)))
+			}
+			cb.ButtonsEqual(row...)
+		}
+	}
+	cb.Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
 	return cb.Build()
 }
@@ -11063,6 +11088,7 @@ func (e *Engine) renderModelSettingsCard(sessionKey string) *Card {
 
 	var md strings.Builder
 	var modelOpts []CardSelectOption
+	var modelActions []CardButton
 	modelInit := ""
 	if switcher, ok := agent.(ModelSwitcher); ok {
 		current := strings.TrimSpace(switcher.GetModel())
@@ -11077,9 +11103,12 @@ func (e *Engine) renderModelSettingsCard(sessionKey string) *Card {
 			label := modelSelectLabel(m, 48)
 			val := fmt.Sprintf("act:/model switch %d", i+1)
 			modelOpts = append(modelOpts, CardSelectOption{Text: label, Value: val})
+			actionLabel := modelActionLabel(m)
 			if m.Name == switcher.GetModel() {
 				modelInit = val
+				actionLabel = "✓ " + actionLabel
 			}
+			modelActions = append(modelActions, DefaultBtn(actionLabel, val))
 		}
 	} else {
 		fmt.Fprintf(&md, "**%s**：%s\n", modelLabel, notSupported)
@@ -11111,6 +11140,13 @@ func (e *Engine) renderModelSettingsCard(sessionKey string) *Card {
 	cb := NewCard().Title(title, "indigo").Markdown(md.String())
 	if len(modelOpts) > 0 {
 		cb.Select(modelPlaceholder, modelOpts, modelInit)
+		for i := 0; i < len(modelActions); i += 2 {
+			end := i + 2
+			if end > len(modelActions) {
+				end = len(modelActions)
+			}
+			cb.ButtonsEqual(modelActions[i:end]...)
+		}
 	}
 	if len(reasoningOpts) > 0 {
 		cb.Select(reasoningPlaceholder, reasoningOpts, reasoningInit)

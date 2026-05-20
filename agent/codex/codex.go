@@ -187,14 +187,24 @@ func (a *Agent) configuredModels() []core.ModelOption {
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	a.mu.RLock()
 	codexHome := a.codexHome
+	hasActiveProvider := a.activeIdx >= 0 && a.activeIdx < len(a.providers)
 	a.mu.RUnlock()
 
 	var models []core.ModelOption
 	models = appendUniqueModelOptions(models, readCodexConfigModelOptions(codexHome)...)
-	models = appendUniqueModelOptions(models, a.fetchModelsFromAPI(ctx)...)
-	models = appendUniqueModelOptions(models, readCodexCachedModels(codexHome)...)
-	models = appendUniqueModelOptions(models, a.configuredModels()...)
-	models = appendUniqueModelOptions(models, defaultCodexModelOptions()...)
+	// Only merge live API / cache discovery when there is no explicit
+	// provider model list configured.  Provider APIs often expose legacy
+	// or cross-family models (o3/o4/codex-mini/etc.); the Feishu selector
+	// should mirror the Codex app's same-provider GPT choices by default.
+	if hasActiveProvider {
+		models = appendUniqueModelOptions(models, a.configuredModels()...)
+		models = appendUniqueModelOptions(models, defaultCodexModelOptions()...)
+	} else {
+		models = appendUniqueModelOptions(models, a.fetchModelsFromAPI(ctx)...)
+		models = appendUniqueModelOptions(models, readCodexCachedModels(codexHome)...)
+		models = appendUniqueModelOptions(models, a.configuredModels()...)
+		models = appendUniqueModelOptions(models, defaultCodexModelOptions()...)
+	}
 	return prioritizeModelOptions(a.GetModel(), models)
 }
 

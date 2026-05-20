@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,6 +147,46 @@ func TestAvailableModels_MergesConfiguredAndCodexDefaults(t *testing.T) {
 	}
 	if !hasModelOption(models, "gpt-5.4") || !hasModelOption(models, "gpt-5.3-codex") {
 		t.Fatalf("models = %v, want Codex default models merged with provider models", models)
+	}
+}
+
+func TestAvailableModels_ActiveProviderSkipsLiveDiscoveryNoise(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{
+				{"id": "o3"},
+				{"id": "gpt-5.5"},
+				{"id": "codex-mini-latest"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	t.Setenv("CODEX_HOME", tmp)
+	t.Setenv("CC_SWITCH_DB_PATH", filepath.Join(tmp, "missing.db"))
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	a := &Agent{
+		model: "gpt-5.5",
+		providers: []core.ProviderConfig{{
+			Name:    "current",
+			APIKey:  "test-key",
+			BaseURL: srv.URL,
+			Model:   "gpt-5.5",
+			Models:  []core.ModelOption{{Name: "provider-only-model"}},
+		}},
+		activeIdx: 0,
+	}
+
+	models := a.AvailableModels(context.Background())
+	for _, forbidden := range []string{"o3", "codex-mini-latest"} {
+		if hasModelOption(models, forbidden) {
+			t.Fatalf("models = %v, should not include live discovery model %q when active provider is configured", models, forbidden)
+		}
+	}
+	if !hasModelOption(models, "provider-only-model") || !hasModelOption(models, "gpt-5.4") {
+		t.Fatalf("models = %v, want configured provider model + Codex defaults", models)
 	}
 }
 
