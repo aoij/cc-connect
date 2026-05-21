@@ -103,6 +103,7 @@ func TestListCodexSessions_DoesNotFilterByHeartbeatPermissions(t *testing.T) {
 	defer db.Close()
 	insertTestThread(t, db, "session-visible", visibleRollout, workDir, "Visible", 0, 2000, "")
 	insertTestThread(t, db, "session-hidden", hiddenRollout, workDir, "Hidden", 0, 3000, "")
+	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-visible", ThreadName: "Visible"}, codexSessionIndexEntry{ID: "session-hidden", ThreadName: "Hidden"})
 	writeTestGlobalState(t, codexHome, "session-visible")
 
 	got, err := listCodexSessions(workDir, codexHome)
@@ -166,6 +167,39 @@ func TestListCodexSessions_SessionIndexOverridesThreadsTitle(t *testing.T) {
 	}
 	if got[0].Summary != "Index title" {
 		t.Fatalf("Summary = %q, want session_index thread_name", got[0].Summary)
+	}
+}
+
+func TestListCodexSessions_FiltersInternalThreadsWithoutUserEventOrIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	userRollout := writeTestRollout(t, codexHome, "session-user", workDir)
+	indexedRollout := writeTestRollout(t, codexHome, "session-indexed-internal", workDir)
+	internalRollout := writeTestRollout(t, codexHome, "session-internal", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-user", userRollout, workDir, "User session", 0, 1000, "")
+	insertTestThread(t, db, "session-indexed-internal", indexedRollout, workDir, "Indexed internal", 0, 2000, "")
+	insertTestThread(t, db, "session-internal", internalRollout, workDir, "Internal only", 0, 3000, "")
+	if _, err := db.Exec(`update threads set has_user_event = 0 where id in (?, ?)`, "session-indexed-internal", "session-internal"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-indexed-internal", ThreadName: "Promoted internal"})
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("listCodexSessions() len = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].ID != "session-indexed-internal" || got[1].ID != "session-user" {
+		t.Fatalf("listCodexSessions() = %#v, want indexed internal + user session", got)
 	}
 }
 
@@ -312,7 +346,8 @@ create table threads (
 	archived integer,
 	updated_at integer,
 	updated_at_ms integer,
-	archived_at integer
+	archived_at integer,
+	has_user_event integer
 )
 `)
 	if err != nil {
@@ -354,9 +389,9 @@ func writeTestSessionIndex(t *testing.T, codexHome string, entries ...codexSessi
 func insertTestThread(t *testing.T, db *sql.DB, id, rolloutPath, cwd, title string, archived int, updatedAt int64, gitBranch string) {
 	t.Helper()
 	_, err := db.Exec(`
-insert into threads (id, rollout_path, cwd, title, first_user_message, preview, git_branch, archived, updated_at, updated_at_ms)
-values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, id, rolloutPath, cwd, title, "first message", "preview message", gitBranch, archived, updatedAt, updatedAt*1000)
+insert into threads (id, rollout_path, cwd, title, first_user_message, preview, git_branch, archived, updated_at, updated_at_ms, has_user_event)
+values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, id, rolloutPath, cwd, title, "first message", "preview message", gitBranch, archived, updatedAt, updatedAt*1000, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -31,6 +31,7 @@ type codexStateThread struct {
 	GitBranch        string
 	UpdatedAt        int64
 	UpdatedAtMS      int64
+	HasUserEvent     int
 }
 
 type codexSessionIndexEntry struct {
@@ -117,7 +118,7 @@ func listCodexAppThreads(workDir, codexHome string) ([]core.AgentSessionInfo, bo
 	indexNames := loadCodexSessionIndexNames(codexHome)
 	rows, err := db.Query(`
 select id, rollout_path, cwd, title, first_user_message, preview, coalesce(git_branch, ''),
-       updated_at, coalesce(updated_at_ms, 0)
+       updated_at, coalesce(updated_at_ms, 0), coalesce(has_user_event, 0)
 from threads
 where archived = 0
 order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
@@ -140,6 +141,7 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 			&row.GitBranch,
 			&row.UpdatedAt,
 			&row.UpdatedAtMS,
+			&row.HasUserEvent,
 		); err != nil {
 			return nil, true, err
 		}
@@ -152,8 +154,14 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 		// session_index.jsonl when present.  The rollout JSONL is only needed
 		// for history/message counts, so do not hide a thread just because
 		// the transcript file is temporarily missing or has moved.
-		if name := strings.TrimSpace(indexNames[row.ID]); name != "" {
-			row.Title = name
+		indexName := strings.TrimSpace(indexNames[row.ID])
+		// Desktop hides internal/sidecar threads that never received a direct
+		// user event unless they have been promoted into session_index.jsonl.
+		if row.HasUserEvent == 0 && indexName == "" {
+			continue
+		}
+		if indexName != "" {
+			row.Title = indexName
 		}
 		sessions = append(sessions, codexThreadToSessionInfo(row))
 	}
