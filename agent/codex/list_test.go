@@ -170,7 +170,7 @@ func TestListCodexSessions_SessionIndexOverridesThreadsTitle(t *testing.T) {
 	}
 }
 
-func TestListCodexSessions_FiltersInternalThreadsWithoutUserEventOrIndex(t *testing.T) {
+func TestListCodexSessions_FollowsDesktopVisibilityFilters(t *testing.T) {
 	tmpDir := t.TempDir()
 	codexHome := filepath.Join(tmpDir, ".codex")
 	workDir := filepath.Join(tmpDir, "project")
@@ -179,17 +179,28 @@ func TestListCodexSessions_FiltersInternalThreadsWithoutUserEventOrIndex(t *test
 	}
 
 	userRollout := writeTestRollout(t, codexHome, "session-user", workDir)
-	indexedRollout := writeTestRollout(t, codexHome, "session-indexed-internal", workDir)
-	internalRollout := writeTestRollout(t, codexHome, "session-internal", workDir)
+	noUserEventRollout := writeTestRollout(t, codexHome, "session-no-user-event", workDir)
+	emptyPreviewRollout := writeTestRollout(t, codexHome, "session-empty-preview", workDir)
+	execRollout := writeTestRollout(t, codexHome, "session-exec", workDir)
 	db := createTestCodexStateDB(t, codexHome)
 	defer db.Close()
 	insertTestThread(t, db, "session-user", userRollout, workDir, "User session", 0, 1000, "")
-	insertTestThread(t, db, "session-indexed-internal", indexedRollout, workDir, "Indexed internal", 0, 2000, "")
-	insertTestThread(t, db, "session-internal", internalRollout, workDir, "Internal only", 0, 3000, "")
-	if _, err := db.Exec(`update threads set has_user_event = 0 where id in (?, ?)`, "session-indexed-internal", "session-internal"); err != nil {
+	insertTestThread(t, db, "session-no-user-event", noUserEventRollout, workDir, "No user event", 0, 2000, "")
+	insertTestThread(t, db, "session-empty-preview", emptyPreviewRollout, workDir, "Empty preview", 0, 3000, "")
+	insertTestThread(t, db, "session-exec", execRollout, workDir, "Exec source", 0, 4000, "")
+	if _, err := db.Exec(`update threads set has_user_event = 0 where id = ?`, "session-no-user-event"); err != nil {
 		t.Fatal(err)
 	}
-	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-indexed-internal", ThreadName: "Promoted internal"})
+	if _, err := db.Exec(`update threads set preview = '' where id = ?`, "session-empty-preview"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update threads set source = 'exec' where id = ?`, "session-exec"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSessionIndex(t, codexHome,
+		codexSessionIndexEntry{ID: "session-no-user-event", ThreadName: "Indexed visible"},
+		codexSessionIndexEntry{ID: "session-empty-preview", ThreadName: "Indexed but empty preview"},
+	)
 
 	got, err := listCodexSessions(workDir, codexHome)
 	if err != nil {
@@ -198,8 +209,41 @@ func TestListCodexSessions_FiltersInternalThreadsWithoutUserEventOrIndex(t *test
 	if len(got) != 2 {
 		t.Fatalf("listCodexSessions() len = %d, want 2: %#v", len(got), got)
 	}
-	if got[0].ID != "session-indexed-internal" || got[1].ID != "session-user" {
-		t.Fatalf("listCodexSessions() = %#v, want indexed internal + user session", got)
+	if got[0].ID != "session-no-user-event" || got[0].Summary != "Indexed visible" || got[1].ID != "session-user" {
+		t.Fatalf("listCodexSessions() = %#v, want no-user-event interactive + user session", got)
+	}
+}
+
+func TestListCodexSessions_FiltersByCodexConfigModelProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model_provider = "codex_local_access"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	keepRollout := writeTestRollout(t, codexHome, "session-keep", workDir)
+	otherRollout := writeTestRollout(t, codexHome, "session-other-provider", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-keep", keepRollout, workDir, "Keep", 0, 1000, "")
+	insertTestThread(t, db, "session-other-provider", otherRollout, workDir, "Other provider", 0, 2000, "")
+	if _, err := db.Exec(`update threads set model_provider = 'cch' where id = ?`, "session-other-provider"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "session-keep" {
+		t.Fatalf("listCodexSessions() = %#v, want only codex_local_access provider", got)
 	}
 }
 
@@ -347,7 +391,10 @@ create table threads (
 	updated_at integer,
 	updated_at_ms integer,
 	archived_at integer,
-	has_user_event integer
+	has_user_event integer,
+	source text,
+	thread_source text,
+	model_provider text
 )
 `)
 	if err != nil {
@@ -389,9 +436,9 @@ func writeTestSessionIndex(t *testing.T, codexHome string, entries ...codexSessi
 func insertTestThread(t *testing.T, db *sql.DB, id, rolloutPath, cwd, title string, archived int, updatedAt int64, gitBranch string) {
 	t.Helper()
 	_, err := db.Exec(`
-insert into threads (id, rollout_path, cwd, title, first_user_message, preview, git_branch, archived, updated_at, updated_at_ms, has_user_event)
-values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, id, rolloutPath, cwd, title, "first message", "preview message", gitBranch, archived, updatedAt, updatedAt*1000, 1)
+insert into threads (id, rollout_path, cwd, title, first_user_message, preview, git_branch, archived, updated_at, updated_at_ms, has_user_event, source, thread_source, model_provider)
+values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, id, rolloutPath, cwd, title, "first message", "preview message", gitBranch, archived, updatedAt, updatedAt*1000, 1, "vscode", "user", "codex_local_access")
 	if err != nil {
 		t.Fatal(err)
 	}

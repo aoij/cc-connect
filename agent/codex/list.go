@@ -32,6 +32,9 @@ type codexStateThread struct {
 	UpdatedAt        int64
 	UpdatedAtMS      int64
 	HasUserEvent     int
+	Source           string
+	ThreadSource     string
+	ModelProvider    string
 }
 
 type codexSessionIndexEntry struct {
@@ -116,9 +119,11 @@ func listCodexAppThreads(workDir, codexHome string) ([]core.AgentSessionInfo, bo
 	}
 	defer db.Close()
 	indexNames := loadCodexSessionIndexNames(codexHome)
+	expectedProvider := codexDesktopListModelProvider(codexHome)
 	rows, err := db.Query(`
 select id, rollout_path, cwd, title, first_user_message, preview, coalesce(git_branch, ''),
-       updated_at, coalesce(updated_at_ms, 0), coalesce(has_user_event, 0)
+       updated_at, coalesce(updated_at_ms, 0), coalesce(has_user_event, 0),
+       coalesce(source, ''), coalesce(thread_source, ''), coalesce(model_provider, '')
 from threads
 where archived = 0
 order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
@@ -142,24 +147,33 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 			&row.UpdatedAt,
 			&row.UpdatedAtMS,
 			&row.HasUserEvent,
+			&row.Source,
+			&row.ThreadSource,
+			&row.ModelProvider,
 		); err != nil {
 			return nil, true, err
 		}
 		if !sameCodexWorkDir(row.Cwd, workDir) {
 			continue
 		}
-		// Keep Feishu's session list aligned with Codex Desktop's left rail:
-		// membership/sort/cwd come from state_5.sqlite.threads, while the
-		// displayed short title is the desktop-maintained thread_name in
-		// session_index.jsonl when present.  The rollout JSONL is only needed
-		// for history/message counts, so do not hide a thread just because
-		// the transcript file is temporarily missing or has moved.
-		indexName := strings.TrimSpace(indexNames[row.ID])
-		// Desktop hides internal/sidecar threads that never received a direct
-		// user event unless they have been promoted into session_index.jsonl.
-		if row.HasUserEvent == 0 && indexName == "" {
+		// Keep Feishu's session list aligned with Codex Desktop / app-server
+		// thread/list defaults: non-archived (SQL), same cwd, non-empty
+		// preview, and interactive sources only (cli/vscode). session_index is
+		// only a title overlay; it must not promote hidden internal rows.
+		if strings.TrimSpace(row.Preview) == "" {
 			continue
 		}
+		if !isCodexDesktopInteractiveSource(row.Source) {
+			continue
+		}
+		if expectedProvider != "" && strings.TrimSpace(row.ModelProvider) != expectedProvider {
+			continue
+		}
+
+		// The rollout JSONL is only needed for history/message counts, so do
+		// not hide a thread just because the transcript file is temporarily
+		// missing or has moved.
+		indexName := strings.TrimSpace(indexNames[row.ID])
 		if indexName != "" {
 			row.Title = indexName
 		}
@@ -169,6 +183,24 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 		return nil, true, err
 	}
 	return sessions, true, nil
+}
+
+func isCodexDesktopInteractiveSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "cli", "vscode":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexDesktopListModelProvider(codexHome string) string {
+	// Codex Desktop/TUI builds its thread/list modelProviders filter from
+	// ~/.codex/config.toml.  Do not use readCodexRuntimeDefaults here: that
+	// intentionally merges cc-switch's current provider for Feishu runtime
+	// execution, while the desktop left rail is still keyed by Codex's own
+	// config.model_provider.
+	return strings.TrimSpace(readCodexConfigRuntime(codexHome).ModelProvider)
 }
 
 func loadCodexSessionIndexNames(codexHome string) map[string]string {
