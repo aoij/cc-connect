@@ -146,11 +146,18 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 		if !sameCodexWorkDir(row.Cwd, workDir) {
 			continue
 		}
-		if !fileExists(row.RolloutPath) {
-			continue
-		}
-		if name := strings.TrimSpace(indexNames[row.ID]); name != "" {
-			row.Title = name
+		// Keep Feishu's session list aligned with Codex Desktop's left rail:
+		// the authoritative list is the threads table in state_5.sqlite.
+		// The rollout JSONL is only needed for history/message counts, so do
+		// not hide a thread just because the transcript file is temporarily
+		// missing or has moved.
+		if strings.TrimSpace(row.Title) == "" && strings.TrimSpace(row.FirstUserMessage) == "" && strings.TrimSpace(row.Preview) == "" {
+			// session_index.jsonl is only a last-resort fallback.  Do not let
+			// it override threads.title/preview, otherwise Feishu can drift
+			// from the Codex Desktop list.
+			if name := strings.TrimSpace(indexNames[row.ID]); name != "" {
+				row.Title = name
+			}
 		}
 		sessions = append(sessions, codexThreadToSessionInfo(row))
 	}
@@ -431,10 +438,14 @@ func findCodexStateDB(codexHome string) string {
 		return ""
 	}
 
-	var candidates []string
+	// Codex Desktop's current primary state DB is state_5.sqlite.  Prefer it
+	// deterministically so Feishu reads from the same place as the desktop
+	// session list even if older/newer state_*.sqlite files have later mtimes.
 	if p := filepath.Join(home, "state_5.sqlite"); fileExists(p) {
-		candidates = append(candidates, p)
+		return cleanCodexPath(p)
 	}
+
+	var candidates []string
 	if matches, _ := filepath.Glob(filepath.Join(home, "state_*.sqlite")); len(matches) > 0 {
 		candidates = append(candidates, matches...)
 	}

@@ -117,7 +117,7 @@ func TestListCodexSessions_DoesNotFilterByHeartbeatPermissions(t *testing.T) {
 	}
 }
 
-func TestListCodexSessions_UsesSessionIndexThreadName(t *testing.T) {
+func TestListCodexSessions_UsesSessionIndexThreadNameAsLastResort(t *testing.T) {
 	tmpDir := t.TempDir()
 	codexHome := filepath.Join(tmpDir, ".codex")
 	workDir := filepath.Join(tmpDir, "project")
@@ -128,8 +128,11 @@ func TestListCodexSessions_UsesSessionIndexThreadName(t *testing.T) {
 	rollout := writeTestRollout(t, codexHome, "session-indexed", workDir)
 	db := createTestCodexStateDB(t, codexHome)
 	defer db.Close()
-	insertTestThread(t, db, "session-indexed", rollout, workDir, "long original first prompt title", 0, 2000, "")
-	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-indexed", ThreadName: "短标题"})
+	insertTestThread(t, db, "session-indexed", rollout, workDir, "", 0, 2000, "")
+	if _, err := db.Exec(`update threads set first_user_message = '', preview = '' where id = ?`, "session-indexed"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-indexed", ThreadName: "Index title"})
 
 	got, err := listCodexSessions(workDir, codexHome)
 	if err != nil {
@@ -138,8 +141,83 @@ func TestListCodexSessions_UsesSessionIndexThreadName(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("listCodexSessions() len = %d, want 1: %#v", len(got), got)
 	}
-	if got[0].Summary != "短标题" {
+	if got[0].Summary != "Index title" {
 		t.Fatalf("Summary = %q, want session_index thread_name", got[0].Summary)
+	}
+}
+
+func TestListCodexSessions_PrefersThreadsTitleOverSessionIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rollout := writeTestRollout(t, codexHome, "session-title", workDir)
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	insertTestThread(t, db, "session-title", rollout, workDir, "Desktop title", 0, 2000, "")
+	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-title", ThreadName: "Index title"})
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listCodexSessions() len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].Summary != "Desktop title" {
+		t.Fatalf("Summary = %q, want threads.title", got[0].Summary)
+	}
+}
+
+func TestListCodexSessions_IncludesThreadWhenRolloutMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexHome := filepath.Join(tmpDir, ".codex")
+	workDir := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	db := createTestCodexStateDB(t, codexHome)
+	defer db.Close()
+	missingRollout := filepath.Join(codexHome, "sessions", "missing.jsonl")
+	insertTestThread(t, db, "session-missing-rollout", missingRollout, workDir, "Visible from DB", 0, 2000, "")
+
+	got, err := listCodexSessions(workDir, codexHome)
+	if err != nil {
+		t.Fatalf("listCodexSessions() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("listCodexSessions() len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != "session-missing-rollout" || got[0].Summary != "Visible from DB" {
+		t.Fatalf("listCodexSessions()[0] = %#v", got[0])
+	}
+	if got[0].MessageCount != 0 {
+		t.Fatalf("MessageCount = %d, want 0 for missing rollout", got[0].MessageCount)
+	}
+}
+
+func TestFindCodexStateDB_PrefersState5(t *testing.T) {
+	codexHome := t.TempDir()
+	old := filepath.Join(codexHome, "state_4.sqlite")
+	state5 := filepath.Join(codexHome, "state_5.sqlite")
+	if err := os.WriteFile(old, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state5, []byte("state5"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(old, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findCodexStateDB(codexHome)
+	if got != filepath.Clean(state5) {
+		t.Fatalf("findCodexStateDB() = %q, want state_5.sqlite %q", got, state5)
 	}
 }
 
