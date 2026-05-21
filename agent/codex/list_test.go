@@ -117,7 +117,7 @@ func TestListCodexSessions_DoesNotFilterByHeartbeatPermissions(t *testing.T) {
 	}
 }
 
-func TestListCodexSessions_UsesSessionIndexThreadNameAsLastResort(t *testing.T) {
+func TestListCodexSessions_UsesSessionIndexThreadName(t *testing.T) {
 	tmpDir := t.TempDir()
 	codexHome := filepath.Join(tmpDir, ".codex")
 	workDir := filepath.Join(tmpDir, "project")
@@ -128,10 +128,7 @@ func TestListCodexSessions_UsesSessionIndexThreadNameAsLastResort(t *testing.T) 
 	rollout := writeTestRollout(t, codexHome, "session-indexed", workDir)
 	db := createTestCodexStateDB(t, codexHome)
 	defer db.Close()
-	insertTestThread(t, db, "session-indexed", rollout, workDir, "", 0, 2000, "")
-	if _, err := db.Exec(`update threads set first_user_message = '', preview = '' where id = ?`, "session-indexed"); err != nil {
-		t.Fatal(err)
-	}
+	insertTestThread(t, db, "session-indexed", rollout, workDir, "long original first prompt title", 0, 2000, "")
 	writeTestSessionIndex(t, codexHome, codexSessionIndexEntry{ID: "session-indexed", ThreadName: "Index title"})
 
 	got, err := listCodexSessions(workDir, codexHome)
@@ -146,7 +143,7 @@ func TestListCodexSessions_UsesSessionIndexThreadNameAsLastResort(t *testing.T) 
 	}
 }
 
-func TestListCodexSessions_PrefersThreadsTitleOverSessionIndex(t *testing.T) {
+func TestListCodexSessions_SessionIndexOverridesThreadsTitle(t *testing.T) {
 	tmpDir := t.TempDir()
 	codexHome := filepath.Join(tmpDir, ".codex")
 	workDir := filepath.Join(tmpDir, "project")
@@ -167,8 +164,8 @@ func TestListCodexSessions_PrefersThreadsTitleOverSessionIndex(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("listCodexSessions() len = %d, want 1: %#v", len(got), got)
 	}
-	if got[0].Summary != "Desktop title" {
-		t.Fatalf("Summary = %q, want threads.title", got[0].Summary)
+	if got[0].Summary != "Index title" {
+		t.Fatalf("Summary = %q, want session_index thread_name", got[0].Summary)
 	}
 }
 

@@ -147,17 +147,13 @@ order by coalesce(updated_at_ms, updated_at * 1000) desc, updated_at desc
 			continue
 		}
 		// Keep Feishu's session list aligned with Codex Desktop's left rail:
-		// the authoritative list is the threads table in state_5.sqlite.
-		// The rollout JSONL is only needed for history/message counts, so do
-		// not hide a thread just because the transcript file is temporarily
-		// missing or has moved.
-		if strings.TrimSpace(row.Title) == "" && strings.TrimSpace(row.FirstUserMessage) == "" && strings.TrimSpace(row.Preview) == "" {
-			// session_index.jsonl is only a last-resort fallback.  Do not let
-			// it override threads.title/preview, otherwise Feishu can drift
-			// from the Codex Desktop list.
-			if name := strings.TrimSpace(indexNames[row.ID]); name != "" {
-				row.Title = name
-			}
+		// membership/sort/cwd come from state_5.sqlite.threads, while the
+		// displayed short title is the desktop-maintained thread_name in
+		// session_index.jsonl when present.  The rollout JSONL is only needed
+		// for history/message counts, so do not hide a thread just because
+		// the transcript file is temporarily missing or has moved.
+		if name := strings.TrimSpace(indexNames[row.ID]); name != "" {
+			row.Title = name
 		}
 		sessions = append(sessions, codexThreadToSessionInfo(row))
 	}
